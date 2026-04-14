@@ -17,9 +17,9 @@ from agents.general import make_general_agent
 
 
 def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id: str,
-                stats: dict, loaded_docs: list, checkpointer):
+                stats: dict, loaded_docs: list, checkpointer, on_retrieval=None):
 
-    research_agent = make_research_agent(llm, fast_llm, pdf_store, loaded_docs)
+    research_agent = make_research_agent(llm, fast_llm, pdf_store, loaded_docs, on_retrieval=on_retrieval)
     memory_agent = make_memory_agent(llm, memory_store, user_id, session_id, stats)
     general_agent = make_general_agent(llm, stats)
 

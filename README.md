@@ -14,7 +14,7 @@
 - `session/`：SQLite 会话持久化
 - `ui/`：Gradio 界面
 
-`app.py` 和 `multi_agent_app.py` 是保留的历史实现参考，不作为当前主线说明依据。
+当前主线实现以 `main.py` 为入口，不再保留旧版单体/历史多 Agent 参考实现。
 
 ## 技术栈
 
