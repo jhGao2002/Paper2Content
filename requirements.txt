@@ -1,0 +1,19 @@
+# Core app
+python-dotenv
+gradio
+langchain-core
+langchain-openai
+langgraph
+langgraph-checkpoint-sqlite
+langgraph-prebuilt
+faiss-cpu; platform_system == "Windows"
+faiss-gpu; platform_system != "Windows"
+pymupdf
+pymupdf4llm
+typing-extensions
+
+# Evaluation scripts
+pandas
+numpy<2
+datasets
+ragas
