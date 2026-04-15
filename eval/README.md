@@ -53,8 +53,8 @@ python eval/eval.py --beta
 
 当前只对比 3 组变体：
 
-1. `01_fixed_chunk_lexical`
-   固定大小分块 + 词法哈希 embedding
+1. `01_fixed_chunk_embedding3`
+   固定大小分块 + `Embedding-3`
 2. `02_parent_child_lexical`
    当前项目的父子块分块 + 词法哈希 embedding
 3. `03_parent_child_embedding3`
@@ -67,11 +67,11 @@ python eval/eval.py --beta
 
 ## 三组方案说明
 
-### `01_fixed_chunk_lexical`
+### `01_fixed_chunk_embedding3`
 
 - 单层切块：`chunk_size=800`
 - overlap：`150`
-- embedding：词法哈希 embedding
+- embedding：`Embedding-3`
 - 检索：FAISS top-k
 
 ### `02_parent_child_lexical`
@@ -194,7 +194,7 @@ result/eval_runs/latest/
 例如：
 
 ```text
-01_fixed_chunk_lexical_20260415_210000/
+01_fixed_chunk_embedding3_20260415_210000/
 ```
 
 运行目录结构示例如下：
@@ -203,7 +203,7 @@ result/eval_runs/latest/
 full_20260415_210000/
   dataset/
     eval_dataset.json
-  01_fixed_chunk_lexical_20260415_210000/
+  01_fixed_chunk_embedding3_20260415_210000/
     answers/
       answers.json
     metrics/

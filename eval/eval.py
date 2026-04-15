@@ -54,10 +54,10 @@ class VariantConfig:
 
 VARIANTS = [
     VariantConfig(
-        slug="01_fixed_chunk_lexical",
-        display_name="Fixed Chunk + Lexical Embedding",
+        slug="01_fixed_chunk_embedding3",
+        display_name="Fixed Chunk + Embedding-3",
         use_parent_child=False,
-        embedding_model="LexicalHashEmbedding",
+        embedding_model="Embedding-3",
     ),
     VariantConfig(
         slug="02_parent_child_lexical",
