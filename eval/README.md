@@ -4,6 +4,11 @@
 
 ## 文件说明
 
+- `generate_eval_dataset.py`
+  - 读取 `eval/papers_example/` 下的 PDF 论文
+  - 调用 LLM 自动生成 `question + ground_truth`
+  - 输出到 `result/eval_dataset.json`
+
 - `step1_generate.py`
   - 读取 `result/eval_dataset.json`
   - 调用当前系统生成回答与检索上下文
@@ -39,6 +44,18 @@ python eval/calculate_f1.py
 python eval/eval_baseline.py
 ```
 
+如果你要先自动构造评测集：
+
+```powershell
+python eval/generate_eval_dataset.py
+```
+
+常用参数示例：
+
+```powershell
+python eval/generate_eval_dataset.py --questions-per-paper 10 --max-chars 15000
+```
+
 ## 前置条件
 
 - 根目录存在 `result/eval_dataset.json`
@@ -56,6 +73,7 @@ python eval/eval_baseline.py
 
 - 这些脚本现在会自动按自身位置定位仓库根目录，所以推荐始终从仓库根目录执行。
 - 评测产物统一放在根目录下的 `result/`，方便集中查看和后续清理。
+- `eval/papers_example/` 用来临时存放待生成评测集的论文，目录中的实际论文文件不会被 Git 跟踪。
 
 ## `eval_dataset.json` 构造方案
 
