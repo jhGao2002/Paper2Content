@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from langchain_core.callbacks import get_usage_metadata_callback
 from langchain_core.documents import Document
 from ragas import evaluate
-from ragas.metrics.collections import (
+from ragas.metrics import (
     answer_correctness,
     answer_relevancy,
     context_precision,
@@ -374,17 +374,18 @@ def evaluate_variant(
     judge_embeddings = get_embeddings()
     judge_llm = get_fast_llm()
     safe_config = RunConfig(max_workers=3, max_retries=10, max_wait=60, timeout=120)
+    metrics = [
+        context_precision,
+        context_recall,
+        answer_correctness,
+        answer_relevancy,
+        faithfulness,
+    ]
 
     with get_usage_metadata_callback() as cb:
         eval_result = evaluate(
             dataset,
-            metrics=[
-                context_precision,
-                context_recall,
-                answer_correctness,
-                answer_relevancy,
-                faithfulness,
-            ],
+            metrics=metrics,
             llm=judge_llm,
             embeddings=judge_embeddings,
             run_config=safe_config,
