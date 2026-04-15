@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import sys
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,13 @@ from datasets import Dataset
 from dotenv import load_dotenv
 from langchain_core.callbacks import get_usage_metadata_callback
 from langchain_core.documents import Document
+
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message=r"Importing .* from 'ragas\.metrics' is deprecated.*",
+)
+
 from ragas import evaluate
 from ragas.metrics import (
     answer_correctness,
