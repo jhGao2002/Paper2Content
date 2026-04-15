@@ -179,6 +179,27 @@ class ParentChildRAG:
         return str(answer).strip(), context
 
 
+class LexicalHashEmbeddings:
+    def __init__(self, dim: int = 512):
+        self.dim = dim
+
+    def _tokenize(self, text: str) -> list[str]:
+        return re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", text.lower())
+
+    def _embed(self, text: str) -> list[float]:
+        vector = [0.0] * self.dim
+        for token in self._tokenize(text):
+            bucket = hash(token) % self.dim
+            vector[bucket] += 1.0
+        return vector
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed(text)
+
+
 def build_answer_prompt(question: str, context: str) -> str:
     return (
         "你是一个论文问答助手。请严格依据给定检索上下文回答问题。\n"
