@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import re
+import os
 import shutil
 import sys
 import warnings
@@ -11,13 +10,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pymupdf4llm
 from datasets import Dataset
 from dotenv import load_dotenv
 from langchain_core.callbacks import get_usage_metadata_callback
 from langchain_core.documents import Document
+from langchain_openai import OpenAIEmbeddings
 
 warnings.filterwarnings(
     "ignore",
@@ -26,13 +25,7 @@ warnings.filterwarnings(
 )
 
 from ragas import evaluate
-from ragas.metrics import (
-    answer_correctness,
-    answer_relevancy,
-    context_precision,
-    context_recall,
-    faithfulness,
-)
+from ragas.metrics import answer_correctness, context_precision, context_recall, faithfulness
 from ragas.run_config import RunConfig
 
 
@@ -58,40 +51,34 @@ class VariantConfig:
     slug: str
     display_name: str
     use_parent_child: bool
-    use_embedding3: bool
+    embedding_model: str
 
 
 VARIANTS = [
     VariantConfig(
-        slug="01_baseline_flat_lexical",
-        display_name="Baseline / Flat Chunk / Lexical Embedding",
+        slug="01_fixed_chunk_embedding2",
+        display_name="Fixed Chunk + Embedding-2",
         use_parent_child=False,
-        use_embedding3=False,
+        embedding_model="Embedding-2",
     ),
     VariantConfig(
-        slug="02_flat_embedding3",
-        display_name="Flat Chunk / Embedding-3",
-        use_parent_child=False,
-        use_embedding3=True,
-    ),
-    VariantConfig(
-        slug="03_parent_child_lexical",
-        display_name="Parent-Child Chunk / Lexical Embedding",
+        slug="02_parent_child_embedding2",
+        display_name="Parent-Child Chunk + Embedding-2",
         use_parent_child=True,
-        use_embedding3=False,
+        embedding_model="Embedding-2",
     ),
     VariantConfig(
-        slug="04_parent_child_embedding3",
-        display_name="Parent-Child Chunk / Embedding-3",
+        slug="03_parent_child_embedding3",
+        display_name="Parent-Child Chunk + Embedding-3",
         use_parent_child=True,
-        use_embedding3=True,
+        embedding_model="Embedding-3",
     ),
 ]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="运行 4 组 RAG 变体评测：分块方式 x embedding 方案。"
+        description="运行 3 组 RAG 检索变体评测：分块策略 x Embedding-2/3。"
     )
     parser.add_argument(
         "--papers-dir",
@@ -109,7 +96,7 @@ def parse_args() -> argparse.Namespace:
         "--questions-per-paper",
         type=int,
         default=5,
-        help="如果需要自动生成评测集，每篇论文生成的问题数量",
+        help="正式模式下每篇论文生成的问答数量，默认 5",
     )
     parser.add_argument(
         "--max-chars",
@@ -125,36 +112,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--beta",
         action="store_true",
-        help="测试模式：只使用 papers_example 中的第一篇论文，并减少问题数量。",
+        help="测试模式：只读取 papers_example 中的第一篇论文，并使用更小规模样本。",
     )
     parser.add_argument(
         "--beta-question-limit",
         type=int,
         default=2,
-        help="beta 模式下最多保留多少条评测样本。",
+        help="beta 模式下最多保留多少条评测样本，默认 2",
     )
     return parser.parse_args()
-
-
-class LexicalHashEmbeddings:
-    def __init__(self, dim: int = 512):
-        self.dim = dim
-
-    def _tokenize(self, text: str) -> list[str]:
-        return re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", text.lower())
-
-    def _embed(self, text: str) -> list[float]:
-        vector = np.zeros(self.dim, dtype="float32")
-        for token in self._tokenize(text):
-            bucket = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) % self.dim
-            vector[bucket] += 1.0
-        return vector.tolist()
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self._embed(text) for text in texts]
-
-    def embed_query(self, text: str) -> list[float]:
-        return self._embed(text)
 
 
 class FlatChunkRAG:
@@ -232,8 +198,7 @@ def compute_f1(precision: float, recall: float) -> float:
 
 def create_run_dirs(beta: bool) -> tuple[Path, Path, str]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_prefix = "beta" if beta else "full"
-    run_name = f"{run_prefix}_{timestamp}"
+    run_name = f"{'beta' if beta else 'full'}_{timestamp}"
     run_dir = RESULT_ROOT / run_name
     latest_dir = RESULT_ROOT / "latest"
     for path in [run_dir / "dataset", run_dir / "summaries"]:
@@ -282,9 +247,7 @@ def select_pdf_files(args: argparse.Namespace) -> list[Path]:
     pdf_files = sorted(path for path in args.papers_dir.resolve().glob("*.pdf") if path.is_file())
     if not pdf_files:
         raise FileNotFoundError(f"未在论文目录中找到 PDF: {args.papers_dir.resolve()}")
-    if args.beta:
-        return pdf_files[:1]
-    return pdf_files
+    return pdf_files[:1] if args.beta else pdf_files
 
 
 def build_dataset_path(args: argparse.Namespace, run_dir: Path) -> Path:
@@ -301,12 +264,8 @@ def ensure_eval_dataset(
     dataset_path = build_dataset_path(args, run_dir)
     usage_summary = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-    need_generate = args.regenerate_dataset or not dataset_path.exists()
-    if args.beta:
-        need_generate = True
-
+    need_generate = args.regenerate_dataset or not dataset_path.exists() or args.beta
     if need_generate:
-        beta_papers_dir = None
         target_papers_dir = args.papers_dir.resolve()
         if args.beta:
             beta_papers_dir = run_dir / "dataset" / "beta_papers"
@@ -318,7 +277,7 @@ def ensure_eval_dataset(
             generate_dataset_from_papers(
                 papers_dir=target_papers_dir,
                 output_path=dataset_path,
-                questions_per_paper=min(args.questions_per_paper, args.beta_question_limit) if args.beta else args.questions_per_paper,
+                questions_per_paper=args.beta_question_limit if args.beta else args.questions_per_paper,
                 max_chars=args.max_chars,
             )
         usage_summary = normalize_usage(cb.usage_metadata)
@@ -336,10 +295,18 @@ def ensure_eval_dataset(
     return dataset, usage_summary, snapshot_path
 
 
-def build_embedding(use_embedding3: bool):
-    if use_embedding3:
+def build_embeddings(model_name: str):
+    if model_name == "Embedding-3":
         return get_embeddings(), "Embedding-3"
-    return LexicalHashEmbeddings(), "LexicalHashEmbedding"
+    return (
+        OpenAIEmbeddings(
+            model="Embedding-2",
+            api_key=os.getenv("ZHIPU_API_KEY"),
+            base_url=os.getenv("ZHIPU_URL"),
+            check_embedding_ctx_length=False,
+        ),
+        "Embedding-2",
+    )
 
 
 def build_pipeline(variant: VariantConfig, store: FaissVectorStore, llm):
@@ -364,11 +331,11 @@ def run_variant(
 ) -> tuple[list[dict], dict[str, int], dict, Path]:
     variant_dir = get_variant_dir(run_dir, variant, timestamp)
     answers_path = variant_dir / "answers" / "answers.json"
-    embeddings, embedding_name = build_embedding(variant.use_embedding3)
+    embeddings, embedding_name = build_embeddings(variant.embedding_model)
     metadata = {
         "variant": variant.slug,
         "display_name": variant.display_name,
-        "chunking_strategy": "parent_child" if variant.use_parent_child else "flat",
+        "chunking_strategy": "parent_child" if variant.use_parent_child else "fixed_flat",
         "embedding": embedding_name,
         "parent_chunk_size": 1500 if variant.use_parent_child else None,
         "parent_chunk_overlap": 200 if variant.use_parent_child else None,
@@ -377,8 +344,6 @@ def run_variant(
         "flat_chunk_size": None if variant.use_parent_child else 800,
         "flat_chunk_overlap": None if variant.use_parent_child else 150,
         "retrieval_top_k": 4,
-        "query_expansion": False,
-        "rerank": False,
         "variant_dir": str(variant_dir.relative_to(run_dir)),
     }
 
@@ -421,7 +386,6 @@ def run_variant(
             )
             print(f"  已完成 {idx}/{total}")
     usage_summary = normalize_usage(cb.usage_metadata)
-
     save_json(answers_path, records)
     return records, usage_summary, metadata, variant_dir
 
@@ -456,7 +420,6 @@ def evaluate_variant(
             "context_recall": float(df["context_recall"].mean()),
             "retrieval_f1": float(df["retrieval_f1"].mean()),
             "answer_correctness": float(df["answer_correctness"].mean()),
-            "answer_relevancy": float(df["answer_relevancy"].mean()),
             "faithfulness": float(df["faithfulness"].mean()),
             "generation_input_tokens": generation_usage["input_tokens"],
             "generation_output_tokens": generation_usage["output_tokens"],
@@ -485,13 +448,7 @@ def evaluate_variant(
     with get_usage_metadata_callback() as cb:
         eval_result = evaluate(
             dataset,
-            metrics=[
-                context_precision,
-                context_recall,
-                answer_correctness,
-                answer_relevancy,
-                faithfulness,
-            ],
+            metrics=[context_precision, context_recall, answer_correctness, faithfulness],
             llm=judge_llm,
             embeddings=judge_embeddings,
             run_config=safe_config,
@@ -512,7 +469,6 @@ def evaluate_variant(
     df["judge_input_tokens"] = judge_usage["input_tokens"]
     df["judge_output_tokens"] = judge_usage["output_tokens"]
     df["judge_total_tokens"] = judge_usage["total_tokens"]
-
     write_dataframe(df, metrics_path)
 
     summary = {
@@ -523,7 +479,6 @@ def evaluate_variant(
         "context_recall": float(df["context_recall"].mean()),
         "retrieval_f1": float(df["retrieval_f1"].mean()),
         "answer_correctness": float(df["answer_correctness"].mean()),
-        "answer_relevancy": float(df["answer_relevancy"].mean()),
         "faithfulness": float(df["faithfulness"].mean()),
         "generation_input_tokens": generation_usage["input_tokens"],
         "generation_output_tokens": generation_usage["output_tokens"],
@@ -560,17 +515,23 @@ def append_results_to_readme(
             f"output={dataset_generation_usage['output_tokens']} / "
             f"total={dataset_generation_usage['total_tokens']}"
         )
+    lines.extend(
+        [
+            "",
+            "| 变体 | Precision | Recall | Retrieval F1 | Correctness | Faithfulness | 生成 Tokens | 评测 Tokens |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
     for summary in summaries:
         lines.append(
-            f"- {summary['variant']}："
-            f"F1={summary['retrieval_f1']:.4f}，"
-            f"Precision={summary['context_precision']:.4f}，"
-            f"Recall={summary['context_recall']:.4f}，"
-            f"Correctness={summary['answer_correctness']:.4f}，"
-            f"Relevancy={summary['answer_relevancy']:.4f}，"
-            f"Faithfulness={summary['faithfulness']:.4f}，"
-            f"生成 tokens={summary['generation_total_tokens']}，"
-            f"评测 tokens={summary['judge_total_tokens']}"
+            f"| {summary['variant']} | "
+            f"{summary['context_precision']:.4f} | "
+            f"{summary['context_recall']:.4f} | "
+            f"{summary['retrieval_f1']:.4f} | "
+            f"{summary['answer_correctness']:.4f} | "
+            f"{summary['faithfulness']:.4f} | "
+            f"{summary['generation_total_tokens']} | "
+            f"{summary['judge_total_tokens']} |"
         )
     with README_PATH.open("a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -629,7 +590,6 @@ def main() -> None:
                 "context_recall": summary["context_recall"],
                 "retrieval_f1": summary["retrieval_f1"],
                 "answer_correctness": summary["answer_correctness"],
-                "answer_relevancy": summary["answer_relevancy"],
                 "faithfulness": summary["faithfulness"],
                 "generation_total_tokens": summary["generation_total_tokens"],
                 "judge_total_tokens": summary["judge_total_tokens"],

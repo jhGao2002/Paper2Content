@@ -9,7 +9,7 @@ python eval/eval.py
 运行后会自动完成：
 
 1. 检查或生成评测集
-2. 运行 4 组检索变体
+2. 运行 3 组检索变体
 3. 使用 Ragas 打分
 4. 统计生成阶段和评测阶段的 token 消耗
 5. 输出清晰命名的中间产物
@@ -49,63 +49,41 @@ beta 测试默认参数：
 python eval/eval.py --beta
 ```
 
-如果想调整自动生成评测集规模：
-
-```powershell
-python eval/eval.py --questions-per-paper 6 --max-chars 15000
-```
-
 ## 当前评测设计
 
-这次评测只聚焦两个变量：
+当前只对比 3 组变体：
 
-- 是否使用父子块
-- 是否使用 `Embedding-3`
+1. `01_fixed_chunk_embedding2`
+   固定大小分块 + `Embedding-2`
+2. `02_parent_child_embedding2`
+   当前项目的父子块分块 + `Embedding-2`
+3. `03_parent_child_embedding3`
+   当前项目的父子块分块 + `Embedding-3`
 
-因此总共有 4 组数据：
+这样对比的目的很明确：
 
-1. `01_baseline_flat_lexical`
-   基线版本：单层切块 + 非 `Embedding-3`
-2. `02_flat_embedding3`
-   只替换 embedding：单层切块 + `Embedding-3`
-3. `03_parent_child_lexical`
-   只替换分块：父子块 + 非 `Embedding-3`
-4. `04_parent_child_embedding3`
-   当前这组检索配置里最强的组合：父子块 + `Embedding-3`
+- 先看“固定分块”到“父子块分块”是否带来收益
+- 再看在当前项目分块策略下，`Embedding-2` 升级到 `Embedding-3` 是否带来收益
 
-这里不再引入 query expansion、rerank、多 Agent 路由等额外变量，目的是把对比聚焦在：
+## 三组方案说明
 
-- 分块策略本身是否有效
-- embedding 方案本身是否有效
-
-## 四组方案说明
-
-### `01_baseline_flat_lexical`
+### `01_fixed_chunk_embedding2`
 
 - 单层切块：`chunk_size=800`
 - overlap：`150`
-- embedding：词法哈希 embedding
+- embedding：`Embedding-2`
 - 检索：FAISS top-k
-- 不使用父子块
 
-### `02_flat_embedding3`
-
-- 单层切块：`chunk_size=800`
-- overlap：`150`
-- embedding：`Embedding-3`
-- 检索：FAISS top-k
-- 不使用父子块
-
-### `03_parent_child_lexical`
+### `02_parent_child_embedding2`
 
 - 父块：`chunk_size=1500`
 - 父块 overlap：`200`
 - 子块：`chunk_size=400`
 - 子块 overlap：`50`
-- embedding：词法哈希 embedding
+- embedding：`Embedding-2`
 - 检索时先搜子块，再回溯父块
 
-### `04_parent_child_embedding3`
+### `03_parent_child_embedding3`
 
 - 父块：`chunk_size=1500`
 - 父块 overlap：`200`
@@ -122,28 +100,23 @@ python eval/eval.py --questions-per-paper 6 --max-chars 15000
 - `context_recall`
 - `retrieval_f1`
 - `answer_correctness`
-- `answer_relevancy`
 - `faithfulness`
-
-各指标计算方式如下。
 
 ### `context_precision`
 
 衡量“检索出来的上下文里，有多少是真正有用的”。
 
-- 分数越高，说明召回的噪声越少
-- 如果召回了很多无关片段，这个指标会下降
+- 分数越高，说明召回噪声越少
 
 ### `context_recall`
 
 衡量“回答所需的关键信息，是否已经被检索出来”。
 
-- 分数越高，说明需要的证据覆盖越充分
-- 如果关键证据没有被召回，这个指标会下降
+- 分数越高，说明证据覆盖更充分
 
 ### `retrieval_f1`
 
-这是本项目里一定会计算的指标，用来综合看召回质量。
+这是一定会计算的核心指标，用来综合看召回质量。
 
 计算公式：
 
@@ -163,21 +136,12 @@ retrieval_f1 = 2 * context_precision * context_recall / (context_precision + con
 衡量最终回答与标准答案 `ground_truth` 的一致程度。
 
 - 分数越高，说明回答越接近标准答案
-- 这个指标更关注“答对了没有”
-
-### `answer_relevancy`
-
-衡量回答是否真正围绕用户问题展开。
-
-- 分数越高，说明回答越切题
-- 如果回答内容正确但跑题，这个指标也会偏低
 
 ### `faithfulness`
 
 衡量回答是否忠于检索上下文。
 
 - 分数越高，说明回答更受检索证据支持
-- 如果回答里有检索上下文无法支撑的内容，这个指标会下降
 
 ## Token 统计
 
@@ -230,7 +194,7 @@ result/eval_runs/latest/
 例如：
 
 ```text
-01_baseline_flat_lexical_20260415_210000/
+01_fixed_chunk_embedding2_20260415_210000/
 ```
 
 运行目录结构示例如下：
@@ -239,23 +203,16 @@ result/eval_runs/latest/
 full_20260415_210000/
   dataset/
     eval_dataset.json
-  01_baseline_flat_lexical_20260415_210000/
+  01_fixed_chunk_embedding2_20260415_210000/
     answers/
       answers.json
     metrics/
       metrics.csv
     runtime/
       ...
-  02_flat_embedding3_20260415_210000/
-    answers/
-      answers.json
-    metrics/
-      metrics.csv
-    runtime/
-      ...
-  03_parent_child_lexical_20260415_210000/
+  02_parent_child_embedding2_20260415_210000/
     ...
-  04_parent_child_embedding3_20260415_210000/
+  03_parent_child_embedding3_20260415_210000/
     ...
   summaries/
     variant_metrics_summary.csv
@@ -263,29 +220,12 @@ full_20260415_210000/
     run_manifest.json
 ```
 
-各文件含义：
-
-- `dataset/eval_dataset.json`
-  本次评测实际使用的数据集副本
-- `*/answers/answers.json`
-  该变体生成的回答和检索上下文
-- `*/metrics/metrics.csv`
-  该变体逐样本的 Ragas 结果
-- `summaries/variant_metrics_summary.csv`
-  4 组方案的均值指标汇总
-- `summaries/variant_token_summary.csv`
-  4 组方案的 token 汇总
-- `summaries/run_manifest.json`
-  本次运行的完整元信息
-
 ## 断点续跑
 
 当前支持断点续跑：
 
 - 如果某个变体的 `answers/answers.json` 已存在，就复用回答缓存
 - 如果某个变体的 `metrics/metrics.csv` 已存在，就复用评测结果
-
-因此如果中途在评测阶段失败，不需要从头再跑完整生成过程。
 
 ## 前置条件
 
@@ -297,6 +237,6 @@ full_20260415_210000/
 
 - `eval/papers_example/` 里的实际论文不会被 Git 跟踪
 - 每次评测结束后，本文件末尾会追加一段结果记录
-- 这份说明优先以当前代码行为为准
+- 结果记录使用 Markdown 表格
 
 ## 评测结果记录
