@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--questions-per-paper",
         type=int,
-        default=8,
+        default=5,
         help="如果需要自动生成评测集，每篇论文生成的问题数量",
     )
     parser.add_argument(
@@ -113,6 +113,17 @@ def parse_args() -> argparse.Namespace:
         "--regenerate-dataset",
         action="store_true",
         help="强制重新生成评测集",
+    )
+    parser.add_argument(
+        "--beta",
+        action="store_true",
+        help="测试模式：只使用 papers_example 中的第一篇论文，并减少问题数量。",
+    )
+    parser.add_argument(
+        "--beta-question-limit",
+        type=int,
+        default=2,
+        help="beta 模式下最多保留多少条评测样本。",
     )
     return parser.parse_args()
 
@@ -211,22 +222,18 @@ def compute_f1(precision: float, recall: float) -> float:
     return 2 * (precision * recall) / (precision + recall)
 
 
-def create_run_dirs() -> tuple[Path, Path]:
-    run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+def create_run_dirs(beta: bool) -> tuple[Path, Path, str]:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_prefix = "beta" if beta else "full"
+    run_name = f"{run_prefix}_{timestamp}"
     run_dir = RESULT_ROOT / run_name
     latest_dir = RESULT_ROOT / "latest"
-    for path in [
-        run_dir / "dataset",
-        run_dir / "answers",
-        run_dir / "metrics",
-        run_dir / "summaries",
-        run_dir / "runtime",
-    ]:
+    for path in [run_dir / "dataset", run_dir / "summaries"]:
         path.mkdir(parents=True, exist_ok=True)
     if latest_dir.exists():
         shutil.rmtree(latest_dir)
     latest_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir, latest_dir
+    return run_dir, latest_dir, timestamp
 
 
 def copy_run_to_latest(run_dir: Path, latest_dir: Path) -> None:
@@ -239,11 +246,7 @@ def copy_run_to_latest(run_dir: Path, latest_dir: Path) -> None:
 
 
 def normalize_usage(usage_metadata: dict) -> dict[str, int]:
-    total = {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-    }
+    total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     for payload in usage_metadata.values():
         total["input_tokens"] += int(payload.get("input_tokens", 0))
         total["output_tokens"] += int(payload.get("output_tokens", 0))
@@ -267,27 +270,62 @@ def write_dataframe(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path, index=False)
 
 
-def ensure_eval_dataset(args: argparse.Namespace, run_dir: Path) -> tuple[list[dict], dict[str, int]]:
-    dataset_path = args.dataset.resolve()
+def select_pdf_files(args: argparse.Namespace) -> list[Path]:
+    pdf_files = sorted(path for path in args.papers_dir.resolve().glob("*.pdf") if path.is_file())
+    if not pdf_files:
+        raise FileNotFoundError(f"未在论文目录中找到 PDF: {args.papers_dir.resolve()}")
+    if args.beta:
+        return pdf_files[:1]
+    return pdf_files
+
+
+def build_dataset_path(args: argparse.Namespace, run_dir: Path) -> Path:
+    if args.beta:
+        return run_dir / "dataset" / "beta_eval_dataset.json"
+    return args.dataset.resolve()
+
+
+def ensure_eval_dataset(
+    args: argparse.Namespace,
+    run_dir: Path,
+    pdf_files: list[Path],
+) -> tuple[list[dict], dict[str, int], Path]:
+    dataset_path = build_dataset_path(args, run_dir)
     usage_summary = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-    if args.regenerate_dataset or not dataset_path.exists():
+    need_generate = args.regenerate_dataset or not dataset_path.exists()
+    if args.beta:
+        need_generate = True
+
+    if need_generate:
+        beta_papers_dir = None
+        target_papers_dir = args.papers_dir.resolve()
+        if args.beta:
+            beta_papers_dir = run_dir / "dataset" / "beta_papers"
+            beta_papers_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(pdf_files[0], beta_papers_dir / pdf_files[0].name)
+            target_papers_dir = beta_papers_dir
+
         with get_usage_metadata_callback() as cb:
             generate_dataset_from_papers(
-                papers_dir=args.papers_dir.resolve(),
+                papers_dir=target_papers_dir,
                 output_path=dataset_path,
-                questions_per_paper=args.questions_per_paper,
+                questions_per_paper=min(args.questions_per_paper, args.beta_question_limit) if args.beta else args.questions_per_paper,
                 max_chars=args.max_chars,
             )
         usage_summary = normalize_usage(cb.usage_metadata)
 
-    with dataset_path.open("r", encoding="utf-8") as f:
-        dataset = json.load(f)
+    dataset = load_json(dataset_path)
     if not isinstance(dataset, list) or not dataset:
         raise ValueError(f"评测集为空或格式不正确: {dataset_path}")
 
-    save_json(run_dir / "dataset" / "eval_dataset.json", dataset)
-    return dataset, usage_summary
+    if args.beta:
+        dataset = dataset[: args.beta_question_limit]
+        save_json(dataset_path, dataset)
+
+    snapshot_path = run_dir / "dataset" / "eval_dataset.json"
+    save_json(snapshot_path, dataset)
+    return dataset, usage_summary, snapshot_path
 
 
 def build_embedding(use_embedding3: bool):
@@ -302,13 +340,22 @@ def build_pipeline(variant: VariantConfig, store: FaissVectorStore, llm):
     return FlatChunkRAG(store, llm)
 
 
+def get_variant_dir(run_dir: Path, variant: VariantConfig, timestamp: str) -> Path:
+    variant_dir = run_dir / f"{variant.slug}_{timestamp}"
+    for path in [variant_dir / "answers", variant_dir / "metrics", variant_dir / "runtime"]:
+        path.mkdir(parents=True, exist_ok=True)
+    return variant_dir
+
+
 def run_variant(
     variant: VariantConfig,
     qa_pairs: list[dict],
     pdf_files: list[Path],
     run_dir: Path,
-) -> tuple[list[dict], dict[str, int], dict]:
-    answers_path = run_dir / "answers" / f"{variant.slug}.json"
+    timestamp: str,
+) -> tuple[list[dict], dict[str, int], dict, Path]:
+    variant_dir = get_variant_dir(run_dir, variant, timestamp)
+    answers_path = variant_dir / "answers" / "answers.json"
     embeddings, embedding_name = build_embedding(variant.use_embedding3)
     metadata = {
         "variant": variant.slug,
@@ -324,23 +371,22 @@ def run_variant(
         "retrieval_top_k": 4,
         "query_expansion": False,
         "rerank": False,
+        "variant_dir": str(variant_dir.relative_to(run_dir)),
     }
 
     if answers_path.exists():
         print(f"=== {variant.display_name}: 复用已有回答缓存 ===")
-        records = load_json(answers_path)
-        usage_summary = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-        }
-        return records, usage_summary, metadata
+        return (
+            load_json(answers_path),
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            metadata,
+            variant_dir,
+        )
 
-    variant_runtime_dir = run_dir / "runtime" / variant.slug
     store = FaissVectorStore(
         embedding=embeddings,
         collection_name="pdf_knowledge",
-        persist_root=variant_runtime_dir / "vectorstores",
+        persist_root=variant_dir / "runtime" / "vectorstores",
     )
     llm = get_llm()
     pipeline = build_pipeline(variant, store, llm)
@@ -369,7 +415,7 @@ def run_variant(
     usage_summary = normalize_usage(cb.usage_metadata)
 
     save_json(answers_path, records)
-    return records, usage_summary, metadata
+    return records, usage_summary, metadata, variant_dir
 
 
 def evaluate_variant(
@@ -377,9 +423,10 @@ def evaluate_variant(
     records: list[dict],
     metadata: dict,
     generation_usage: dict[str, int],
+    variant_dir: Path,
     run_dir: Path,
 ) -> tuple[dict, dict[str, int]]:
-    metrics_path = run_dir / "metrics" / f"{variant.slug}.csv"
+    metrics_path = variant_dir / "metrics" / "metrics.csv"
     if metrics_path.exists():
         print(f"=== {variant.display_name}: 复用已有评测结果 ===")
         df = pd.read_csv(metrics_path)
@@ -426,18 +473,17 @@ def evaluate_variant(
     judge_embeddings = get_embeddings()
     judge_llm = get_fast_llm()
     safe_config = RunConfig(max_workers=3, max_retries=10, max_wait=60, timeout=120)
-    metrics = [
-        context_precision,
-        context_recall,
-        answer_correctness,
-        answer_relevancy,
-        faithfulness,
-    ]
 
     with get_usage_metadata_callback() as cb:
         eval_result = evaluate(
             dataset,
-            metrics=metrics,
+            metrics=[
+                context_precision,
+                context_recall,
+                answer_correctness,
+                answer_relevancy,
+                faithfulness,
+            ],
             llm=judge_llm,
             embeddings=judge_embeddings,
             run_config=safe_config,
@@ -483,39 +529,19 @@ def evaluate_variant(
     return summary, judge_usage
 
 
-def build_comparison_rows(summaries: list[dict]) -> list[dict]:
-    rows = []
-    metric_names = [
-        "context_precision",
-        "context_recall",
-        "retrieval_f1",
-        "answer_correctness",
-        "answer_relevancy",
-        "faithfulness",
-        "generation_total_tokens",
-        "judge_total_tokens",
-    ]
-    for summary in summaries:
-        base = {
-            "variant": summary["variant"],
-            "display_name": summary["display_name"],
-        }
-        for metric_name in metric_names:
-            base[metric_name] = summary[metric_name]
-        rows.append(base)
-    return rows
-
-
 def append_results_to_readme(
     summaries: list[dict],
     dataset_size: int,
     dataset_generation_usage: dict[str, int],
     run_dir: Path,
+    beta: bool,
 ) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    mode = "beta" if beta else "full"
     lines = [
         "",
         f"### {timestamp}",
+        f"- 模式：{mode}",
         f"- 样本数：{dataset_size}",
         f"- 结果目录：`{run_dir}`",
     ]
@@ -526,7 +552,6 @@ def append_results_to_readme(
             f"output={dataset_generation_usage['output_tokens']} / "
             f"total={dataset_generation_usage['total_tokens']}"
         )
-
     for summary in summaries:
         lines.append(
             f"- {summary['variant']}："
@@ -539,7 +564,6 @@ def append_results_to_readme(
             f"生成 tokens={summary['generation_total_tokens']}，"
             f"评测 tokens={summary['judge_total_tokens']}"
         )
-
     with README_PATH.open("a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -547,27 +571,29 @@ def append_results_to_readme(
 def main() -> None:
     load_dotenv(ROOT / ".env")
     args = parse_args()
-    run_dir, latest_dir = create_run_dirs()
+    run_dir, latest_dir, timestamp = create_run_dirs(args.beta)
+    pdf_files = select_pdf_files(args)
+    dataset, dataset_generation_usage, dataset_path = ensure_eval_dataset(args, run_dir, pdf_files)
 
-    dataset, dataset_generation_usage = ensure_eval_dataset(args, run_dir)
-    pdf_files = sorted(args.papers_dir.resolve().glob("*.pdf"))
-    if not pdf_files:
-        raise FileNotFoundError(f"未在论文目录中找到 PDF: {args.papers_dir.resolve()}")
+    print(f"使用论文数: {len(pdf_files)}")
+    print(f"使用数据集: {dataset_path}")
 
     variant_summaries = []
     token_rows = []
     for variant in VARIANTS:
-        records, generation_usage, metadata = run_variant(
+        records, generation_usage, metadata, variant_dir = run_variant(
             variant=variant,
             qa_pairs=dataset,
             pdf_files=pdf_files,
             run_dir=run_dir,
+            timestamp=timestamp,
         )
         summary, judge_usage = evaluate_variant(
             variant=variant,
             records=records,
             metadata=metadata,
             generation_usage=generation_usage,
+            variant_dir=variant_dir,
             run_dir=run_dir,
         )
         variant_summaries.append(summary)
@@ -575,6 +601,7 @@ def main() -> None:
             {
                 "variant": variant.slug,
                 "display_name": variant.display_name,
+                "variant_dir": str(variant_dir.relative_to(run_dir)),
                 "generation_input_tokens": generation_usage["input_tokens"],
                 "generation_output_tokens": generation_usage["output_tokens"],
                 "generation_total_tokens": generation_usage["total_tokens"],
@@ -598,20 +625,19 @@ def main() -> None:
                 "faithfulness": summary["faithfulness"],
                 "generation_total_tokens": summary["generation_total_tokens"],
                 "judge_total_tokens": summary["judge_total_tokens"],
+                "variant_dir": summary["metadata"]["variant_dir"],
             }
             for summary in variant_summaries
         ]
     )
-    comparison_df = pd.DataFrame(build_comparison_rows(variant_summaries))
     token_df = pd.DataFrame(token_rows)
-
     write_dataframe(summary_df, run_dir / "summaries" / "variant_metrics_summary.csv")
-    write_dataframe(comparison_df, run_dir / "summaries" / "variant_comparison.csv")
     write_dataframe(token_df, run_dir / "summaries" / "variant_token_summary.csv")
     save_json(
         run_dir / "summaries" / "run_manifest.json",
         {
             "generated_at": datetime.now().isoformat(timespec="minutes"),
+            "beta": args.beta,
             "dataset_generation_tokens": dataset_generation_usage,
             "variants": variant_summaries,
         },
@@ -623,6 +649,7 @@ def main() -> None:
         dataset_size=len(dataset),
         dataset_generation_usage=dataset_generation_usage,
         run_dir=run_dir,
+        beta=args.beta,
     )
 
     print("=" * 60)
