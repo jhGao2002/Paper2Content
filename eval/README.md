@@ -1,33 +1,19 @@
 # Eval 使用说明
 
-`eval/` 目录用于统一管理项目评测。现在的主入口是：
+`eval/` 目录用于统一管理 RAG 评测。当前主入口是：
 
 ```powershell
 python eval/eval.py
 ```
 
-在放好测试论文后，只需要运行这一条命令，就会自动完成：
+放好测试论文之后，只需要运行这一条命令，就会自动完成：
 
-1. 检查或生成 `result/eval_dataset.json`
-2. 运行 `Baseline_Naive_RAG`
-3. 运行 `Current_Project_Full`
-4. 使用 Ragas 计算评测指标
-5. 输出中间文件到 `result/`
-6. 将本次对比结果追加写入本文件末尾
-
-## 目录说明
-
-- `eval.py`
-  - 统一评测入口
-  - 自动串起数据集生成、baseline 评测、当前系统评测、Ragas 打分、结果汇总
-
-- `generate_eval_dataset.py`
-  - 从 `eval/papers_example/` 中的论文自动生成 `result/eval_dataset.json`
-  - 也可以单独运行，用于只生成评测集
-
-- `papers_example/`
-  - 临时放评测论文的目录
-  - 目录中的实际论文文件不会被 Git 跟踪
+1. 检查或生成评测集
+2. 运行 4 组 RAG 变体
+3. 使用 Ragas 打分
+4. 统计生成阶段和评测阶段的 token 消耗
+5. 输出清晰命名的中间产物
+6. 把本次结果追加写入本文件末尾
 
 ## 使用流程
 
@@ -38,7 +24,7 @@ python eval/eval.py
 python eval/eval.py
 ```
 
-如果希望强制重新生成评测集：
+如果想强制重新生成评测集：
 
 ```powershell
 python eval/eval.py --regenerate-dataset
@@ -50,85 +36,162 @@ python eval/eval.py --regenerate-dataset
 python eval/eval.py --questions-per-paper 10 --max-chars 15000
 ```
 
-## 评测输入
+## 当前评测设计
 
-默认输入包括两部分：
+这次评测故意简化成两个变量：
 
-- 论文目录：`eval/papers_example/`
-- 评测集：`result/eval_dataset.json`
+- 是否使用父子块
+- 是否使用 `Embedding-3`
 
-如果 `result/eval_dataset.json` 不存在，`eval.py` 会先调用 LLM 自动生成它。  
-自动生成只是冷启动方案，建议后续人工抽查一部分 `question + ground_truth`。
+因此总共有 4 组数据：
 
-## Baseline 与当前系统的对比定义
+1. `01_baseline_flat_lexical`
+   基线版本：单层切块 + 非 `Embedding-3`（词法哈希 embedding）
+2. `02_flat_embedding3`
+   只替换 embedding：单层切块 + `Embedding-3`
+3. `03_parent_child_lexical`
+   只替换分块：父子块 + 非 `Embedding-3`
+4. `04_parent_child_embedding3`
+   当前最强的这组检索配置：父子块 + `Embedding-3`
 
-### 1. `Baseline_Naive_RAG`
+这里不再引入 query expansion、rerank、多 Agent 路由等额外变量，目的是把对比聚焦在：
 
-这是一个真正的朴素 RAG baseline，用于和当前项目做清晰对比。
+- 分块策略本身是否有效
+- embedding 方案本身是否有效
 
-参数与行为：
+## 四组方案说明
+
+### `01_baseline_flat_lexical`
 
 - 单层切块：`chunk_size=800`
-- 重叠：`chunk_overlap=150`
-- 单路查询：不做 query expansion
-- 检索：直接向量召回 `top_k=4`
-- 不做 rerank
-- 不做 parent-child chunking
-- 不做 Supervisor 路由
-- 不做多 Agent 协同
-- 不使用会话记忆
-- 基于检索到的 chunk 直接让 LLM 生成答案
+- overlap：`150`
+- embedding：词法哈希 embedding
+- 检索：FAISS top-k
+- 不使用父子块
 
-### 2. `Current_Project_Full`
+### `02_flat_embedding3`
 
-这是当前项目的完整版本，也就是你现在主系统里的增强 RAG 流程。
+- 单层切块：`chunk_size=800`
+- overlap：`150`
+- embedding：`Embedding-3`
+- 检索：FAISS top-k
+- 不使用父子块
 
-参数与行为：
+### `03_parent_child_lexical`
 
-- 父块切分：`chunk_size=1500`
-- 父块重叠：`chunk_overlap=200`
-- 子块切分：`chunk_size=400`
-- 子块重叠：`chunk_overlap=50`
-- Query Expansion：原问题 + 3 个扩展查询
-- 每个查询召回：`top_k=3`
-- 先召回子块，再回溯父块上下文
-- 使用 LLM 对候选父块做 rerank / 片段筛选
-- 通过 `Supervisor` 做路由
-- 支持多 Agent 协作
-- 支持复杂问题的 plan-and-act
-- 支持长期记忆能力
+- 父块：`chunk_size=1500`
+- 父块 overlap：`200`
+- 子块：`chunk_size=400`
+- 子块 overlap：`50`
+- embedding：词法哈希 embedding
+- 检索时先搜子块，再回溯父块
 
-## 当前系统相对 Baseline 的主要优化点
+### `04_parent_child_embedding3`
 
-- 从单层 chunk 升级为 parent-child chunking，尽量兼顾召回精度和回答上下文完整性
-- 从单次查询升级为 query expansion，降低用户表述和论文措辞不一致导致的漏召回
-- 增加 rerank，减少把相似但不关键的片段直接塞给生成模型
-- 增加 Supervisor 与多 Agent 路由，允许复杂问题拆步处理
-- 增加长期记忆能力，服务真实多轮对话场景
+- 父块：`chunk_size=1500`
+- 父块 overlap：`200`
+- 子块：`chunk_size=400`
+- 子块 overlap：`50`
+- embedding：`Embedding-3`
+- 检索时先搜子块，再回溯父块
 
-## 中间产物
+## 评测指标
 
-评测运行后，`result/` 下会输出这些文件：
+当前会统一输出这些指标：
 
-- `eval_dataset.json`
-- `generated_answers_cache_baseline.json`
-- `generated_answers_cache_v2.json`
-- `experiment_results_log_baseline.csv`
-- `experiment_results_with_f1_baseline.csv`
-- `experiment_results_log_v2.csv`
-- `experiment_results_with_f1.csv`
-- `eval_comparison_summary.csv`
-- `eval_comparison_summary.json`
-- `eval_runtime/`
+- `context_precision`
+- `context_recall`
+- `retrieval_f1`
+- `answer_correctness`
+- `answer_relevancy`
+- `faithfulness`
 
 其中：
 
-- `generated_answers_cache_baseline.json` 是 baseline 的回答缓存
-- `generated_answers_cache_v2.json` 是当前系统的回答缓存
-- `experiment_results_log_*.csv` 是 Ragas 原始分项结果
-- `experiment_results_with_f1*.csv` 额外包含 `retrieval_f1`
-- `eval_comparison_summary.*` 是两套方案的均值对比摘要
-- `eval_runtime/` 是隔离运行时目录，避免污染主知识库和主会话数据
+- `retrieval_f1` 是由 `context_precision` 和 `context_recall` 计算得到
+- `answer_relevancy` 用来看回答是否真正切题
+- `faithfulness` 用来看回答是否忠于检索上下文
+
+## Token 统计
+
+当前结果里会记录两类 token：
+
+- `generation_*_tokens`
+  指每个变体在“检索后生成答案”阶段的 token 用量
+- `judge_*_tokens`
+  指 Ragas 评测阶段的 token 用量
+
+注意：
+
+- 当前统计的是 LLM token
+- embedding 阶段的 token 或计费不在这份统计里
+
+## 输出目录
+
+评测结果会输出到：
+
+```text
+result/eval_runs/
+```
+
+每次运行都会生成一个新目录，例如：
+
+```text
+result/eval_runs/run_20260415_183000/
+```
+
+同时还会同步一份最新结果到：
+
+```text
+result/eval_runs/latest/
+```
+
+## 中间产物命名
+
+每次运行的目录结构如下：
+
+```text
+dataset/
+  eval_dataset.json
+
+answers/
+  01_baseline_flat_lexical.json
+  02_flat_embedding3.json
+  03_parent_child_lexical.json
+  04_parent_child_embedding3.json
+
+metrics/
+  01_baseline_flat_lexical.csv
+  02_flat_embedding3.csv
+  03_parent_child_lexical.csv
+  04_parent_child_embedding3.csv
+
+summaries/
+  variant_metrics_summary.csv
+  variant_comparison.csv
+  variant_token_summary.csv
+  run_manifest.json
+
+runtime/
+  ...
+```
+
+各文件含义：
+
+- `dataset/eval_dataset.json`
+  本次评测实际使用的数据集副本
+- `answers/*.json`
+  每个变体生成的回答和检索上下文
+- `metrics/*.csv`
+  每个变体逐样本的 Ragas 结果
+- `summaries/variant_metrics_summary.csv`
+  4 组方案的均值指标汇总
+- `summaries/variant_comparison.csv`
+  便于横向比较的总表
+- `summaries/variant_token_summary.csv`
+  4 组方案的 token 汇总
+- `summaries/run_manifest.json`
+  本次运行的完整元信息
 
 ## 前置条件
 
@@ -138,7 +201,7 @@ python eval/eval.py --questions-per-paper 10 --max-chars 15000
 
 ## 说明
 
-- 评测脚本会使用隔离的运行时目录，不会污染你主流程使用的 `vectorstores/`、`documents.json`、`sessions.db`
-- 生成的评测结果会额外追加写入本文件，便于直接查看历史记录
+- `eval/papers_example/` 里的实际论文不会被 Git 跟踪
+- 每次评测结束后，本文件末尾会追加一段结果记录
 
 ## 评测结果记录
