@@ -121,11 +121,12 @@ def generate_samples_for_pdf(
     return cleaned_samples
 
 
-def main() -> None:
-    args = parse_args()
-    papers_dir = args.papers_dir.resolve()
-    output_path = args.output.resolve()
-
+def generate_dataset_from_papers(
+    papers_dir: Path,
+    output_path: Path,
+    questions_per_paper: int,
+    max_chars: int,
+) -> list[dict[str, str]]:
     if not papers_dir.exists():
         raise FileNotFoundError(f"论文目录不存在: {papers_dir}")
 
@@ -142,8 +143,8 @@ def main() -> None:
         samples = generate_samples_for_pdf(
             pdf_path=pdf_path,
             fast_llm=fast_llm,
-            questions_per_paper=args.questions_per_paper,
-            max_chars=args.max_chars,
+            questions_per_paper=questions_per_paper,
+            max_chars=max_chars,
         )
         dataset.extend(samples)
         print(f"  生成 {len(samples)} 条样本")
@@ -155,6 +156,17 @@ def main() -> None:
     print(f"评测集已写入: {output_path}")
     print(f"样本总数: {len(dataset)}")
     print("建议人工抽查 10% 到 20% 的样本，再用于正式评测。")
+    return dataset
+
+
+def main() -> None:
+    args = parse_args()
+    generate_dataset_from_papers(
+        papers_dir=args.papers_dir.resolve(),
+        output_path=args.output.resolve(),
+        questions_per_paper=args.questions_per_paper,
+        max_chars=args.max_chars,
+    )
 
 
 if __name__ == "__main__":

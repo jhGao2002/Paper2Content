@@ -1,113 +1,144 @@
 # Eval 使用说明
 
-这个目录集中存放项目里的评测脚本。
+`eval/` 目录用于统一管理项目评测。现在的主入口是：
 
-## 文件说明
+```powershell
+python eval/eval.py
+```
+
+在放好测试论文后，只需要运行这一条命令，就会自动完成：
+
+1. 检查或生成 `result/eval_dataset.json`
+2. 运行 `Baseline_Naive_RAG`
+3. 运行 `Current_Project_Full`
+4. 使用 Ragas 计算评测指标
+5. 输出中间文件到 `result/`
+6. 将本次对比结果追加写入本文件末尾
+
+## 目录说明
+
+- `eval.py`
+  - 统一评测入口
+  - 自动串起数据集生成、baseline 评测、当前系统评测、Ragas 打分、结果汇总
 
 - `generate_eval_dataset.py`
-  - 读取 `eval/papers_example/` 下的 PDF 论文
-  - 调用 LLM 自动生成 `question + ground_truth`
-  - 输出到 `result/eval_dataset.json`
+  - 从 `eval/papers_example/` 中的论文自动生成 `result/eval_dataset.json`
+  - 也可以单独运行，用于只生成评测集
 
-- `step1_generate.py`
-  - 读取 `result/eval_dataset.json`
-  - 调用当前系统生成回答与检索上下文
-  - 输出缓存到 `result/generated_answers_cache_v2.json`
+- `papers_example/`
+  - 临时放评测论文的目录
+  - 目录中的实际论文文件不会被 Git 跟踪
 
-- `step2_evaluate.py`
-  - 读取 `result/generated_answers_cache_v2.json`
-  - 使用 Ragas 做评测
-  - 输出结果到 `result/experiment_results_log_v2.csv`
+## 使用流程
 
-- `calculate_f1.py`
-  - 读取 `result/experiment_results_log_v2.csv`
-  - 计算 `retrieval_f1`
-  - 输出到 `result/experiment_results_with_f1.csv`
-
-- `eval_baseline.py`
-  - 直接跑一套基线评测流程
-  - 输出到 `result/experiment_results_log.csv`
-
-## 推荐使用流程
-
-在仓库根目录执行：
+1. 把待评测论文 PDF 放进 `eval/papers_example/`
+2. 运行：
 
 ```powershell
-python eval/step1_generate.py
-python eval/step2_evaluate.py
-python eval/calculate_f1.py
+python eval/eval.py
 ```
 
-如果你要跑基线版本：
+如果希望强制重新生成评测集：
 
 ```powershell
-python eval/eval_baseline.py
+python eval/eval.py --regenerate-dataset
 ```
 
-如果你要先自动构造评测集：
+如果想调节自动生成评测集的规模：
 
 ```powershell
-python eval/generate_eval_dataset.py
+python eval/eval.py --questions-per-paper 10 --max-chars 15000
 ```
 
-常用参数示例：
+## 评测输入
 
-```powershell
-python eval/generate_eval_dataset.py --questions-per-paper 10 --max-chars 15000
-```
+默认输入包括两部分：
+
+- 论文目录：`eval/papers_example/`
+- 评测集：`result/eval_dataset.json`
+
+如果 `result/eval_dataset.json` 不存在，`eval.py` 会先调用 LLM 自动生成它。  
+自动生成只是冷启动方案，建议后续人工抽查一部分 `question + ground_truth`。
+
+## Baseline 与当前系统的对比定义
+
+### 1. `Baseline_Naive_RAG`
+
+这是一个真正的朴素 RAG baseline，用于和当前项目做清晰对比。
+
+参数与行为：
+
+- 单层切块：`chunk_size=800`
+- 重叠：`chunk_overlap=150`
+- 单路查询：不做 query expansion
+- 检索：直接向量召回 `top_k=4`
+- 不做 rerank
+- 不做 parent-child chunking
+- 不做 Supervisor 路由
+- 不做多 Agent 协同
+- 不使用会话记忆
+- 基于检索到的 chunk 直接让 LLM 生成答案
+
+### 2. `Current_Project_Full`
+
+这是当前项目的完整版本，也就是你现在主系统里的增强 RAG 流程。
+
+参数与行为：
+
+- 父块切分：`chunk_size=1500`
+- 父块重叠：`chunk_overlap=200`
+- 子块切分：`chunk_size=400`
+- 子块重叠：`chunk_overlap=50`
+- Query Expansion：原问题 + 3 个扩展查询
+- 每个查询召回：`top_k=3`
+- 先召回子块，再回溯父块上下文
+- 使用 LLM 对候选父块做 rerank / 片段筛选
+- 通过 `Supervisor` 做路由
+- 支持多 Agent 协作
+- 支持复杂问题的 plan-and-act
+- 支持长期记忆能力
+
+## 当前系统相对 Baseline 的主要优化点
+
+- 从单层 chunk 升级为 parent-child chunking，尽量兼顾召回精度和回答上下文完整性
+- 从单次查询升级为 query expansion，降低用户表述和论文措辞不一致导致的漏召回
+- 增加 rerank，减少把相似但不关键的片段直接塞给生成模型
+- 增加 Supervisor 与多 Agent 路由，允许复杂问题拆步处理
+- 增加长期记忆能力，服务真实多轮对话场景
+
+## 中间产物
+
+评测运行后，`result/` 下会输出这些文件：
+
+- `eval_dataset.json`
+- `generated_answers_cache_baseline.json`
+- `generated_answers_cache_v2.json`
+- `experiment_results_log_baseline.csv`
+- `experiment_results_with_f1_baseline.csv`
+- `experiment_results_log_v2.csv`
+- `experiment_results_with_f1.csv`
+- `eval_comparison_summary.csv`
+- `eval_comparison_summary.json`
+- `eval_runtime/`
+
+其中：
+
+- `generated_answers_cache_baseline.json` 是 baseline 的回答缓存
+- `generated_answers_cache_v2.json` 是当前系统的回答缓存
+- `experiment_results_log_*.csv` 是 Ragas 原始分项结果
+- `experiment_results_with_f1*.csv` 额外包含 `retrieval_f1`
+- `eval_comparison_summary.*` 是两套方案的均值对比摘要
+- `eval_runtime/` 是隔离运行时目录，避免污染主知识库和主会话数据
 
 ## 前置条件
 
-- 根目录存在 `result/eval_dataset.json`
-- `.env` 中已经配置评测所需的模型相关环境变量
-- 项目依赖已经安装完成
-
-## 结果文件
-
-- `result/generated_answers_cache_v2.json`
-- `result/experiment_results_log_v2.csv`
-- `result/experiment_results_with_f1.csv`
-- `result/experiment_results_log.csv`
+- `.env` 中已配置模型相关环境变量
+- 项目依赖已安装完成
+- `eval/papers_example/` 下已有待评测论文，或 `result/eval_dataset.json` 已准备好
 
 ## 说明
 
-- 这些脚本现在会自动按自身位置定位仓库根目录，所以推荐始终从仓库根目录执行。
-- 评测产物统一放在根目录下的 `result/`，方便集中查看和后续清理。
-- `eval/papers_example/` 用来临时存放待生成评测集的论文，目录中的实际论文文件不会被 Git 跟踪。
+- 评测脚本会使用隔离的运行时目录，不会污染你主流程使用的 `vectorstores/`、`documents.json`、`sessions.db`
+- 生成的评测结果会额外追加写入本文件，便于直接查看历史记录
 
-## `eval_dataset.json` 构造方案
-
-当前项目不会自动生成 `result/eval_dataset.json`，需要手工整理评测问答集。现有脚本只要求每条样本至少包含下面两个字段：
-
-- `question`：评测时实际提给系统的问题
-- `ground_truth`：用于评测的标准答案
-
-最小可用格式如下：
-
-```json
-[
-  {
-    "question": "LoRA 的核心思想是什么？",
-    "ground_truth": "LoRA 通过冻结原始模型参数，仅训练低秩矩阵来近似权重更新，从而降低微调成本。"
-  },
-  {
-    "question": "AdapterFusion 主要解决什么问题？",
-    "ground_truth": "AdapterFusion 旨在融合多个任务适配器中的知识，在避免灾难性遗忘的同时提升迁移能力。"
-  }
-]
-```
-
-推荐构造流程：
-
-1. 先确定评测范围，只选当前知识库里已经入库的论文或资料。
-2. 每篇文档整理 5 到 10 个问题，覆盖定义类、方法类、对比类、实验结论类问题。
-3. `ground_truth` 尽量写成简洁但完整的标准答案，不要只写关键词。
-4. 避免把问题写得过于模糊，尽量让答案能够在单篇文档或少量上下文中定位。
-5. 整理完成后保存到根目录 `result/eval_dataset.json`，再运行 `step1_generate.py` 和 `step2_evaluate.py`。
-
-编写样本时的建议：
-
-- 尽量避免“这篇文章好吗”这类开放问题，优先使用可核对事实的问题。
-- 如果问题涉及多个方法对比，`ground_truth` 里要明确比较维度。
-- 每条样本只评一个核心点，避免一个问题里同时追问多个子问题。
-- 如果后续要分析召回效果，可以额外给每条样本补充 `source`、`keywords` 等字段，但当前脚本不会读取它们。
+## 评测结果记录
