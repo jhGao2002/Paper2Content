@@ -53,34 +53,34 @@ python eval/eval.py --beta
 
 当前只对比 3 组变体：
 
-1. `01_fixed_chunk_embedding2`
-   固定大小分块 + `Embedding-2`
-2. `02_parent_child_embedding2`
-   当前项目的父子块分块 + `Embedding-2`
+1. `01_fixed_chunk_lexical`
+   固定大小分块 + 词法哈希 embedding
+2. `02_parent_child_lexical`
+   当前项目的父子块分块 + 词法哈希 embedding
 3. `03_parent_child_embedding3`
    当前项目的父子块分块 + `Embedding-3`
 
 这样对比的目的很明确：
 
 - 先看“固定分块”到“父子块分块”是否带来收益
-- 再看在当前项目分块策略下，`Embedding-2` 升级到 `Embedding-3` 是否带来收益
+- 再看在当前项目分块策略下，词法哈希 embedding 升级到 `Embedding-3` 是否带来收益
 
 ## 三组方案说明
 
-### `01_fixed_chunk_embedding2`
+### `01_fixed_chunk_lexical`
 
 - 单层切块：`chunk_size=800`
 - overlap：`150`
-- embedding：`Embedding-2`
+- embedding：词法哈希 embedding
 - 检索：FAISS top-k
 
-### `02_parent_child_embedding2`
+### `02_parent_child_lexical`
 
 - 父块：`chunk_size=1500`
 - 父块 overlap：`200`
 - 子块：`chunk_size=400`
 - 子块 overlap：`50`
-- embedding：`Embedding-2`
+- embedding：词法哈希 embedding
 - 检索时先搜子块，再回溯父块
 
 ### `03_parent_child_embedding3`
@@ -194,7 +194,7 @@ result/eval_runs/latest/
 例如：
 
 ```text
-01_fixed_chunk_embedding2_20260415_210000/
+01_fixed_chunk_lexical_20260415_210000/
 ```
 
 运行目录结构示例如下：
@@ -203,14 +203,14 @@ result/eval_runs/latest/
 full_20260415_210000/
   dataset/
     eval_dataset.json
-  01_fixed_chunk_embedding2_20260415_210000/
+  01_fixed_chunk_lexical_20260415_210000/
     answers/
       answers.json
     metrics/
       metrics.csv
     runtime/
       ...
-  02_parent_child_embedding2_20260415_210000/
+  02_parent_child_lexical_20260415_210000/
     ...
   03_parent_child_embedding3_20260415_210000/
     ...

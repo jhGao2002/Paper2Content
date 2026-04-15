@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 import warnings
@@ -16,7 +15,6 @@ from datasets import Dataset
 from dotenv import load_dotenv
 from langchain_core.callbacks import get_usage_metadata_callback
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
 
 warnings.filterwarnings(
     "ignore",
@@ -56,16 +54,16 @@ class VariantConfig:
 
 VARIANTS = [
     VariantConfig(
-        slug="01_fixed_chunk_embedding2",
-        display_name="Fixed Chunk + Embedding-2",
+        slug="01_fixed_chunk_lexical",
+        display_name="Fixed Chunk + Lexical Embedding",
         use_parent_child=False,
-        embedding_model="Embedding-2",
+        embedding_model="LexicalHashEmbedding",
     ),
     VariantConfig(
-        slug="02_parent_child_embedding2",
-        display_name="Parent-Child Chunk + Embedding-2",
+        slug="02_parent_child_lexical",
+        display_name="Parent-Child Chunk + Lexical Embedding",
         use_parent_child=True,
-        embedding_model="Embedding-2",
+        embedding_model="LexicalHashEmbedding",
     ),
     VariantConfig(
         slug="03_parent_child_embedding3",
@@ -78,7 +76,7 @@ VARIANTS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="运行 3 组 RAG 检索变体评测：分块策略 x Embedding-2/3。"
+        description="运行 3 组 RAG 检索变体评测：分块策略 x Lexical/Embedding-3。"
     )
     parser.add_argument(
         "--papers-dir",
@@ -298,15 +296,7 @@ def ensure_eval_dataset(
 def build_embeddings(model_name: str):
     if model_name == "Embedding-3":
         return get_embeddings(), "Embedding-3"
-    return (
-        OpenAIEmbeddings(
-            model="Embedding-2",
-            api_key=os.getenv("ZHIPU_API_KEY"),
-            base_url=os.getenv("ZHIPU_URL"),
-            check_embedding_ctx_length=False,
-        ),
-        "Embedding-2",
-    )
+    return LexicalHashEmbeddings(), "LexicalHashEmbedding"
 
 
 def build_pipeline(variant: VariantConfig, store: FaissVectorStore, llm):
