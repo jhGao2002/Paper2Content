@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config import get_fast_llm  # noqa: E402
+from config import get_llm  # noqa: E402
 
 
 PAPERS_DIR = Path(__file__).resolve().parent / "papers_example"
@@ -93,14 +93,14 @@ def build_prompt(filename: str, excerpt: str, questions_per_paper: int) -> str:
 
 def generate_samples_for_pdf(
     pdf_path: Path,
-    fast_llm,
+    llm,
     questions_per_paper: int,
     max_chars: int,
 ) -> list[dict[str, str]]:
     md_text = pymupdf4llm.to_markdown(str(pdf_path))
     excerpt = md_text[:max_chars]
     prompt = build_prompt(pdf_path.name, excerpt, questions_per_paper)
-    raw = fast_llm.invoke(prompt).content
+    raw = llm.invoke(prompt).content
     raw_text = str(raw).strip()
     json_text = extract_json_block(raw_text)
     samples = json.loads(json_text)
@@ -134,7 +134,7 @@ def generate_dataset_from_papers(
     if not pdf_files:
         raise FileNotFoundError(f"未在目录中找到 PDF 文件: {papers_dir}")
 
-    fast_llm = get_fast_llm()
+    llm = get_llm()
     dataset = []
 
     print(f"开始生成评测集，共 {len(pdf_files)} 篇论文...")
@@ -142,7 +142,7 @@ def generate_dataset_from_papers(
         print(f"[{index}/{len(pdf_files)}] 处理 {pdf_path.name}")
         samples = generate_samples_for_pdf(
             pdf_path=pdf_path,
-            fast_llm=fast_llm,
+            llm=llm,
             questions_per_paper=questions_per_paper,
             max_chars=max_chars,
         )

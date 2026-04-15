@@ -15,6 +15,11 @@ python eval/eval.py
 5. 输出清晰命名的中间产物
 6. 将本次结果追加写入本文件末尾
 
+其中模型分工是：
+
+- 评测集生成：使用主模型 `get_llm()`
+- Ragas 打分：使用快速模型 `get_fast_llm()`
+
 ## 使用流程
 
 1. 把待评测论文 PDF 放进 `eval/papers_example/`
