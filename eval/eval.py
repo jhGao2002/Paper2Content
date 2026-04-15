@@ -257,6 +257,11 @@ def save_json(path: Path, payload) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
+def load_json(path: Path):
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def write_dataframe(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
@@ -303,7 +308,34 @@ def run_variant(
     pdf_files: list[Path],
     run_dir: Path,
 ) -> tuple[list[dict], dict[str, int], dict]:
+    answers_path = run_dir / "answers" / f"{variant.slug}.json"
     embeddings, embedding_name = build_embedding(variant.use_embedding3)
+    metadata = {
+        "variant": variant.slug,
+        "display_name": variant.display_name,
+        "chunking_strategy": "parent_child" if variant.use_parent_child else "flat",
+        "embedding": embedding_name,
+        "parent_chunk_size": 1500 if variant.use_parent_child else None,
+        "parent_chunk_overlap": 200 if variant.use_parent_child else None,
+        "child_chunk_size": 400 if variant.use_parent_child else None,
+        "child_chunk_overlap": 50 if variant.use_parent_child else None,
+        "flat_chunk_size": None if variant.use_parent_child else 800,
+        "flat_chunk_overlap": None if variant.use_parent_child else 150,
+        "retrieval_top_k": 4,
+        "query_expansion": False,
+        "rerank": False,
+    }
+
+    if answers_path.exists():
+        print(f"=== {variant.display_name}: 复用已有回答缓存 ===")
+        records = load_json(answers_path)
+        usage_summary = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+        return records, usage_summary, metadata
+
     variant_runtime_dir = run_dir / "runtime" / variant.slug
     store = FaissVectorStore(
         embedding=embeddings,
@@ -336,22 +368,7 @@ def run_variant(
             print(f"  已完成 {idx}/{total}")
     usage_summary = normalize_usage(cb.usage_metadata)
 
-    save_json(run_dir / "answers" / f"{variant.slug}.json", records)
-    metadata = {
-        "variant": variant.slug,
-        "display_name": variant.display_name,
-        "chunking_strategy": "parent_child" if variant.use_parent_child else "flat",
-        "embedding": embedding_name,
-        "parent_chunk_size": 1500 if variant.use_parent_child else None,
-        "parent_chunk_overlap": 200 if variant.use_parent_child else None,
-        "child_chunk_size": 400 if variant.use_parent_child else None,
-        "child_chunk_overlap": 50 if variant.use_parent_child else None,
-        "flat_chunk_size": None if variant.use_parent_child else 800,
-        "flat_chunk_overlap": None if variant.use_parent_child else 150,
-        "retrieval_top_k": 4,
-        "query_expansion": False,
-        "rerank": False,
-    }
+    save_json(answers_path, records)
     return records, usage_summary, metadata
 
 
@@ -362,6 +379,41 @@ def evaluate_variant(
     generation_usage: dict[str, int],
     run_dir: Path,
 ) -> tuple[dict, dict[str, int]]:
+    metrics_path = run_dir / "metrics" / f"{variant.slug}.csv"
+    if metrics_path.exists():
+        print(f"=== {variant.display_name}: 复用已有评测结果 ===")
+        df = pd.read_csv(metrics_path)
+        judge_usage = {
+            "input_tokens": int(df["judge_input_tokens"].iloc[0]) if "judge_input_tokens" in df.columns and not df.empty else 0,
+            "output_tokens": int(df["judge_output_tokens"].iloc[0]) if "judge_output_tokens" in df.columns and not df.empty else 0,
+            "total_tokens": int(df["judge_total_tokens"].iloc[0]) if "judge_total_tokens" in df.columns and not df.empty else 0,
+        }
+        generation_usage = {
+            "input_tokens": int(df["generation_input_tokens"].iloc[0]) if "generation_input_tokens" in df.columns and not df.empty else generation_usage["input_tokens"],
+            "output_tokens": int(df["generation_output_tokens"].iloc[0]) if "generation_output_tokens" in df.columns and not df.empty else generation_usage["output_tokens"],
+            "total_tokens": int(df["generation_total_tokens"].iloc[0]) if "generation_total_tokens" in df.columns and not df.empty else generation_usage["total_tokens"],
+        }
+        summary = {
+            "variant": variant.slug,
+            "display_name": variant.display_name,
+            "sample_count": len(records),
+            "context_precision": float(df["context_precision"].mean()),
+            "context_recall": float(df["context_recall"].mean()),
+            "retrieval_f1": float(df["retrieval_f1"].mean()),
+            "answer_correctness": float(df["answer_correctness"].mean()),
+            "answer_relevancy": float(df["answer_relevancy"].mean()),
+            "faithfulness": float(df["faithfulness"].mean()),
+            "generation_input_tokens": generation_usage["input_tokens"],
+            "generation_output_tokens": generation_usage["output_tokens"],
+            "generation_total_tokens": generation_usage["total_tokens"],
+            "judge_input_tokens": judge_usage["input_tokens"],
+            "judge_output_tokens": judge_usage["output_tokens"],
+            "judge_total_tokens": judge_usage["total_tokens"],
+            "metadata": metadata,
+            "metrics_file": str(metrics_path.relative_to(run_dir)),
+        }
+        return summary, judge_usage
+
     dataset = Dataset.from_dict(
         {
             "question": [item["question"] for item in records],
@@ -407,7 +459,6 @@ def evaluate_variant(
     df["judge_output_tokens"] = judge_usage["output_tokens"]
     df["judge_total_tokens"] = judge_usage["total_tokens"]
 
-    metrics_path = run_dir / "metrics" / f"{variant.slug}.csv"
     write_dataframe(df, metrics_path)
 
     summary = {
