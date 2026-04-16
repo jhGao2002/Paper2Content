@@ -96,18 +96,35 @@ class XHSMCPPublishArgs:
 
 
 @dataclass
+class XHSPreparedUploadPayload:
+    title: str
+    content: str
+    images: list[str]
+    tags: list[str] = field(default_factory=list)
+    paper_title: str = ""
+    paper_title_short: str = ""
+    is_original: bool = True
+    visibility: str = "公开可见"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class XHSNoteArtifact:
     note: XHSNoteDraft
     image_prompt: str
     image_negative_prompt: str
     cover_source_materials: list[dict[str, str]] = field(default_factory=list)
     cover_core_insight: str = ""
+    paper_title: str = ""
+    paper_title_short: str = ""
     image_paths: list[str] = field(default_factory=list)
     image_error: str = ""
-    mcp_args: XHSMCPPublishArgs | None = None
+    prepared_payload: XHSPreparedUploadPayload | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["note"] = self.note.to_dict()
-        payload["mcp_args"] = self.mcp_args.to_dict() if self.mcp_args else None
+        payload["prepared_payload"] = self.prepared_payload.to_dict() if self.prepared_payload else None
         return payload

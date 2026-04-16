@@ -72,21 +72,22 @@ def build_cover_prompt(
     palette = image_plan.color_palette or "奶白、浅米、暖橙、浅青"
 
     return (
-        "请生成一张适合小红书图文封面的 1:1 配图。"
-        f"需要表达的论文核心洞察是：{core_insight}。"
-        f"主体：{main_subject}。"
-        f"场景：{scene}。"
-        f"画面中的问题状态：{pain_point}。"
-        f"画面中的解决状态：{solution}。"
-        f"道具元素：{props}。"
-        f"构图：{composition}。"
-        f"色彩：{palette}。"
+        "请生成一张适合小红书图文封面的 1:1 配图，作为论文 insight 的视觉封面。"
+        f"核心洞察：{core_insight}。"
+        f"主角与主体：{main_subject}。"
+        f"场景设定：{scene}。"
+        f"问题阶段的可视化：{pain_point}。"
+        f"解决阶段的可视化：{solution}。"
+        f"辅助理解元素：{props}。"
+        f"构图要求：{composition}。"
+        f"色彩气质：{palette}。"
         f"风格关键词：{style}。"
-        "请重点通过人物动作、物件状态对比、信息被整理后的秩序感，来表现这篇内容解决了什么问题。"
-        "不要依赖大段中文标题，不要满版海报字，不要做成纯文字封面。"
-        "可以出现极少量无法辨认的小标签或界面元素，但不能让文字成为画面主体。"
-        "核心洞察请按中文理解进行视觉表达，同时保持论文语义准确。"
-        "整体要求清晰、生活化、有知识分享感，适合 512x512 正方形封面。"
+        "请把抽象方法变化转成具体画面现象，例如分布形态变化、检索结果变化、对齐程度变化、生成过程稳定性变化、输入输出前后对照。"
+        "要让读者一眼看出问题状态和改进状态的区别，但不要把画面做成纯图表，也不要做成只有文字的海报。"
+        "可以使用少量示意图、卡片、网格、热力图、轨迹线、对比面板等元素辅助理解。"
+        "画面主体清楚，层次明确，方便后续继续做统一风格迁移。"
+        "不要依赖大段中文标题，不要满版海报字，不要让文字成为主体。"
+        "整体要求清晰、干净、易理解，适合 512x512 正方形封面。"
     )
 
 
@@ -154,12 +155,13 @@ def generate_cover_images(
     output_dir: Path | None = None,
     cover_core_insight: str = "",
     supporting_elements: list[str] | None = None,
+    prompt_override: str | None = None,
 ) -> list[str]:
     api_key = _image_api_key()
     if not api_key:
         raise RuntimeError("未配置 DASHSCOPE_API_KEY（可回退使用 QWEN_IMAGE_API_KEY）。")
 
-    prompt = build_cover_prompt(
+    prompt = (prompt_override or "").strip() or build_cover_prompt(
         note,
         cover_core_insight=cover_core_insight,
         supporting_elements=supporting_elements,

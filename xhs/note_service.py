@@ -6,8 +6,7 @@ import time
 from pathlib import Path
 
 from xhs.image_service import build_cover_negative_prompt, build_cover_prompt, generate_cover_images
-from xhs.publish_service import build_mcp_publish_args, publish_note_via_mcp_sync
-from xhs.schemas import XHSNoteArtifact, XHSNoteDraft
+from xhs.schemas import XHSNoteArtifact, XHSNoteDraft, XHSPreparedUploadPayload
 
 
 def _log_progress(message: str) -> None:
@@ -157,6 +156,44 @@ def _repair_note(note: XHSNoteDraft) -> XHSNoteDraft:
     if not note.image_plan.solution_visual:
         note.image_plan.solution_visual = f"和“{note.solved_problem}”相关的清晰、有秩序、被解决后的状态"
     return note
+
+
+def _extract_paper_title(source_materials: list[dict[str, str]]) -> str:
+    if not source_materials:
+        return ""
+    return str(source_materials[0].get("title", "")).strip()
+
+
+def _build_paper_title_short(title: str) -> str:
+    raw = title.strip()
+    if not raw:
+        return ""
+    words = re.findall(r"[A-Za-z0-9]+", raw)
+    if not words:
+        compact = re.sub(r"\s+", "", raw)
+        return compact[:12]
+    if len(words) == 1:
+        return words[0][:12]
+    acronym = "".join(word[0].upper() for word in words if word)
+    return acronym[:12]
+
+
+def _compose_upload_title(note_title: str, paper_title_short: str) -> str:
+    title = note_title.strip()
+    short = paper_title_short.strip()
+    if not short:
+        return title
+    prefix = f"[{short}] "
+    if title.startswith(prefix) or title.startswith(short):
+        return title
+    return f"{prefix}{title}".strip()
+
+
+def _build_upload_content(note: XHSNoteDraft) -> str:
+    content = note.body.strip()
+    if note.cta and note.cta not in content:
+        content = f"{content}\n\n{note.cta}".strip()
+    return content
 
 
 class XHSNoteService:
@@ -359,6 +396,84 @@ class XHSNoteService:
             "supporting_elements": supporting,
         }
 
+    def _build_detailed_cover_prompt(
+        self,
+        note: XHSNoteDraft,
+        cover_brief: dict[str, object],
+        source_materials: list[dict[str, str]],
+        paper_title_short: str,
+    ) -> str:
+        core_insight = str(cover_brief.get("core_insight", "")).strip() or note.solved_problem or note.summary
+        supporting_elements = [
+            str(item).strip()
+            for item in cover_brief.get("supporting_elements", []) or []
+            if str(item).strip()
+        ]
+        source_excerpt = ""
+        if source_materials:
+            first = source_materials[0]
+            source_excerpt = f"论文标题：{first.get('title', '')}\n原文片段：{first.get('excerpt', '')}"
+
+        prompt = (
+            "你是一名论文内容可视化导演，需要把论文核心洞察改写成适合文生图模型的详细中文 prompt。\n"
+            "目标是生成一张 512x512 的小红书封面图，并为后续可能的风格迁移保留清晰主体、清楚层次和稳定语义。\n"
+            "请重点把“问题状态”和“解决状态”都可视化出来，必要时加入统计图形、过程示意、前后对比、辅助物件，"
+            "但不要依赖大量文字，不要把封面做成纯海报字。\n"
+            "如果洞察本身包含因果关系或机制变化，比如分布偏态变正态、参考图检索提升风格迁移、噪声轨迹变稳定，"
+            "要明确描述这种变化应该如何被画面表现出来。\n"
+            "请只输出 JSON，不要解释：\n"
+            "{\n"
+            '  "detailed_prompt": "一段详细中文 prompt，120-220字，直接给文生图模型",\n'
+            '  "supporting_elements": ["最多6个辅助视觉元素"],\n'
+            '  "composition": "更具体的构图要求",\n'
+            '  "pain_point_visual": "更具体的问题状态视觉描述",\n'
+            '  "solution_visual": "更具体的解决状态视觉描述",\n'
+            '  "style_keywords": ["最多5个风格关键词"],\n'
+            '  "avoid_elements": ["最多6个避免元素"]\n'
+            "}\n\n"
+            f"论文简称：{paper_title_short or '未提供'}\n"
+            f"核心洞察：{core_insight}\n"
+            f"当前主体：{note.image_plan.main_subject}\n"
+            f"当前场景：{note.image_plan.scene}\n"
+            f"当前问题状态：{note.image_plan.pain_point_visual}\n"
+            f"当前解决状态：{note.image_plan.solution_visual}\n"
+            f"当前辅助元素：{', '.join(supporting_elements or note.image_plan.props)}\n"
+            f"{source_excerpt}"
+        )
+        try:
+            _log_progress("调用 LLM 生成更详细的封面视觉 prompt")
+            raw = self.llm.invoke(prompt).content
+            data = _extract_json_payload(str(raw))
+            detailed_prompt = str(data.get("detailed_prompt", "")).strip()
+            note.image_plan.composition = str(data.get("composition", "")).strip() or note.image_plan.composition
+            note.image_plan.pain_point_visual = (
+                str(data.get("pain_point_visual", "")).strip() or note.image_plan.pain_point_visual
+            )
+            note.image_plan.solution_visual = (
+                str(data.get("solution_visual", "")).strip() or note.image_plan.solution_visual
+            )
+            style_keywords = [str(item).strip() for item in data.get("style_keywords", []) if str(item).strip()]
+            avoid_elements = [str(item).strip() for item in data.get("avoid_elements", []) if str(item).strip()]
+            if style_keywords:
+                note.image_plan.style_keywords = style_keywords
+            if avoid_elements:
+                note.image_plan.avoid_elements = avoid_elements
+            merged_supporting = supporting_elements + [
+                str(item).strip() for item in data.get("supporting_elements", []) if str(item).strip()
+            ]
+            if merged_supporting:
+                note.image_plan.props = list(dict.fromkeys(merged_supporting))[:6]
+            if detailed_prompt:
+                return detailed_prompt
+        except Exception as exc:
+            _log_progress(f"详细封面 prompt 生成失败，回退到规则模板：{exc}")
+
+        return build_cover_prompt(
+            note,
+            cover_core_insight=core_insight,
+            supporting_elements=supporting_elements,
+        )
+
     def generate_note_artifact(
         self,
         history: list[dict],
@@ -372,16 +487,19 @@ class XHSNoteService:
         _log_progress("进入 generate_note_artifact")
         note = self.generate_note(history)
         source_materials = self._get_cover_source_materials()
+        paper_title = _extract_paper_title(source_materials)
+        paper_title_short = _build_paper_title_short(paper_title)
         if source_materials:
             _log_progress(f"找到 {len(source_materials)} 份封面源材料，默认使用第一篇已加载文档")
         else:
             _log_progress("未找到原文摘要/引言源材料，回退使用笔记结论")
         cover_brief = self._build_cover_brief(note, history, source_materials)
-        _log_progress("开始生成封面 prompt")
-        image_prompt = build_cover_prompt(
-            note,
-            cover_core_insight=str(cover_brief.get("core_insight", "")).strip(),
-            supporting_elements=list(cover_brief.get("supporting_elements", []) or []),
+        _log_progress("开始生成详细封面 prompt")
+        image_prompt = self._build_detailed_cover_prompt(
+            note=note,
+            cover_brief=cover_brief,
+            source_materials=source_materials,
+            paper_title_short=paper_title_short,
         )
         negative_prompt = build_cover_negative_prompt(note)
         _log_progress(f"封面 prompt 已生成，长度={len(image_prompt)}")
@@ -398,39 +516,65 @@ class XHSNoteService:
                     output_dir=target_dir,
                     cover_core_insight=str(cover_brief.get("core_insight", "")).strip(),
                     supporting_elements=list(cover_brief.get("supporting_elements", []) or []),
+                    prompt_override=image_prompt,
                 )
                 _log_progress(f"图片生成完成，数量={len(image_paths)}")
             except Exception as exc:
                 image_error = str(exc)
                 _log_progress(f"图片生成失败：{image_error}")
 
+        prepared_payload = XHSPreparedUploadPayload(
+            title=_compose_upload_title(note.title, paper_title_short),
+            content=_build_upload_content(note),
+            images=image_paths,
+            tags=list(dict.fromkeys(note.hashtags)),
+            paper_title=paper_title,
+            paper_title_short=paper_title_short,
+            is_original=is_original,
+            visibility=visibility,
+        )
         artifact = XHSNoteArtifact(
             note=note,
             image_prompt=image_prompt,
             image_negative_prompt=negative_prompt,
             cover_source_materials=source_materials,
             cover_core_insight=str(cover_brief.get("core_insight", "")).strip(),
+            paper_title=paper_title,
+            paper_title_short=paper_title_short,
             image_paths=image_paths,
             image_error=image_error,
-            mcp_args=build_mcp_publish_args(
-                note=note,
-                image_paths=image_paths,
-                is_original=is_original,
-                visibility=visibility,
-            ),
+            prepared_payload=prepared_payload,
         )
         _log_progress(f"artifact 构建完成，总耗时={time.perf_counter() - overall_start:.2f}s")
         return artifact.to_dict()
 
     def publish_generated_note(self, artifact: dict) -> dict:
-        _log_progress("开始组装发布参数")
-        mcp_args = artifact.get("mcp_args") or {}
-        note = artifact.get("note") or {}
-        publish_args = build_mcp_publish_args(
-            note=XHSNoteDraft.from_dict(note),
-            image_paths=list(mcp_args.get("images", [])),
-            is_original=bool(mcp_args.get("is_original", True)),
-            visibility=str(mcp_args.get("visibility", "公开可见")),
+        _log_progress("开始整理上传用标题、正文和封面图")
+        prepared_payload = artifact.get("prepared_payload") or {}
+        if prepared_payload:
+            return {
+                "success": True,
+                "message": "已准备好上传内容，当前不会自动调用小红书 MCP 发布。",
+                "data": prepared_payload,
+                "mode": "prepared_upload",
+            }
+
+        note = XHSNoteDraft.from_dict(artifact.get("note") or {})
+        paper_title = str(artifact.get("paper_title", "")).strip()
+        paper_title_short = str(artifact.get("paper_title_short", "")).strip()
+        payload = XHSPreparedUploadPayload(
+            title=_compose_upload_title(note.title, paper_title_short),
+            content=_build_upload_content(note),
+            images=list(artifact.get("image_paths", []) or []),
+            tags=list(dict.fromkeys(note.hashtags)),
+            paper_title=paper_title,
+            paper_title_short=paper_title_short,
+            is_original=True,
+            visibility="公开可见",
         )
-        _log_progress("开始调用小红书 MCP 发布")
-        return publish_note_via_mcp_sync(publish_args)
+        return {
+            "success": True,
+            "message": "已准备好上传内容，当前不会自动调用小红书 MCP 发布。",
+            "data": payload.to_dict(),
+            "mode": "prepared_upload",
+        }

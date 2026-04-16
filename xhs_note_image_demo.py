@@ -70,6 +70,7 @@ def main() -> None:
         image_count=1,
         output_dir=str(output_dir),
     )
+    prepared = service.publish_generated_note(artifact)
 
     note = artifact["note"]
     markdown = (
@@ -87,6 +88,9 @@ def main() -> None:
     )
 
     print(f"标题：{note['title']}")
+    if prepared.get("data"):
+        print(f"上传标题：{prepared['data'].get('title', '')}")
+        print(f"论文简称：{prepared['data'].get('paper_title_short', '')}")
     print(f"问题：{note['core_problem']}")
     print(f"解决：{note['solved_problem']}")
     print(f"封面 prompt：{artifact['image_prompt']}")

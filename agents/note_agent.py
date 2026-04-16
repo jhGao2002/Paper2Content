@@ -2,7 +2,7 @@
 # 定义 NoteAgent 的工具和系统提示。
 # recall_notes：从向量记忆中检索本会话历史笔记和自动提取的事实。
 # save_note：将用户明确要求记录的内容保存为笔记。
-# publish_graphic_note：将当前会话中的文献 insight 整理为小红书图文笔记、生成配图并自动发布。
+# publish_graphic_note：将当前会话中的文献 insight 整理为小红书图文笔记、生成封面图并准备上传内容。
 
 import time
 
@@ -17,7 +17,7 @@ SYSTEM_PROMPT = (
     "使用 recall_notes 查询本会话的历史笔记和重要事实，"
     "使用 save_note 保存用户明确要求记录的新笔记。\n"
     "如果用户要求整理图文笔记、发布图文笔记、发布到小红书、自动生成配图后发布，"
-    "必须调用 publish_graphic_note 执行自动化发布。\n"
+    "必须调用 publish_graphic_note 执行图文笔记整理、封面图生成和上传内容准备。\n"
     "如果当前对话里已经有上一步整理出的文献 insight，请把这些 insight 提炼后放进 publish_graphic_note 的 extra_context 参数。\n"
     "每次回答只需调用一次工具，调用后直接基于结果作答。"
 )
@@ -84,9 +84,9 @@ def make_note_agent(
 
     @tool
     def publish_graphic_note(extra_context: str = "", visibility: str = "公开可见") -> str:
-        """将当前会话中的文献 insight 整理成小红书图文笔记、生成配图并自动发布。"""
+        """将当前会话中的文献 insight 整理成小红书图文笔记、生成封面图并准备上传内容。"""
         if note_service is None:
-            return "当前环境未初始化图文笔记发布服务，暂时无法自动发布。"
+            return "当前环境未初始化图文笔记服务，暂时无法生成封面图和上传内容。"
 
         history = _build_note_history(note_history_provider, extra_context)
         if not history:
@@ -108,7 +108,7 @@ def make_note_agent(
         if artifact["image_error"] or not artifact["image_paths"]:
             _log_progress("阶段 2/3 失败：配图未生成，已返回提示词和错误信息")
             return (
-                f"图文笔记已整理完成，但自动发布中止。\n"
+                f"图文笔记已整理完成，但封面图还未生成成功。\n"
                 f"标题：{note['title']}\n"
                 f"摘要：{note['summary']}\n"
                 f"正文：{note['body']}\n"
@@ -116,37 +116,19 @@ def make_note_agent(
                 f"封面提示词：{artifact['image_prompt']}"
             )
 
-        try:
-            _log_progress("阶段 3/3：开始调用小红书 MCP 发布")
-            result = note_service.publish_generated_note(artifact)
-        except Exception as exc:
-            _log_progress(f"阶段 3/3 失败：发布异常：{exc}")
-            return (
-                f"图文笔记和配图已生成，但发布失败：{exc}\n"
-                f"标题：{note['title']}\n"
-                f"正文：{note['body']}\n"
-                f"图片：{', '.join(artifact['image_paths'])}"
-            )
-
-        if result.get("success"):
-            total_elapsed = time.perf_counter() - start_time
-            _log_progress(f"阶段 3/3 完成：发布成功，总耗时={total_elapsed:.2f}s")
-            return (
-                f"小红书图文笔记已自动发布成功。\n"
-                f"标题：{note['title']}\n"
-                f"摘要：{note['summary']}\n"
-                f"正文：{note['body']}\n"
-                f"图片：{', '.join(artifact['image_paths'])}\n"
-                f"返回信息：{result.get('message', '发布成功')}"
-            )
-
-        _log_progress(f"阶段 3/3 完成：发布返回失败，message={result.get('message', '未知错误')}")
+        _log_progress("阶段 3/3：开始整理小红书上传内容")
+        result = note_service.publish_generated_note(artifact)
+        prepared_payload = result.get("data") or {}
+        total_elapsed = time.perf_counter() - start_time
+        _log_progress(f"阶段 3/3 完成：上传内容已准备好，总耗时={total_elapsed:.2f}s")
         return (
-            f"图文笔记和配图已生成，但发布失败。\n"
-            f"标题：{note['title']}\n"
-            f"正文：{note['body']}\n"
+            "图文笔记、封面图和上传文案都已准备好。\n"
+            f"上传标题：{prepared_payload.get('title', note['title'])}\n"
+            f"摘要：{note['summary']}\n"
+            f"正文：{prepared_payload.get('content', note['body'])}\n"
             f"图片：{', '.join(artifact['image_paths'])}\n"
-            f"返回信息：{result.get('message', '未知错误')}"
+            f"论文信息：{prepared_payload.get('paper_title') or '未提取到论文标题'}\n"
+            f"封面提示词：{artifact['image_prompt']}"
         )
 
     return build_sub_agent(

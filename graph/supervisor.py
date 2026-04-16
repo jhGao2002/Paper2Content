@@ -94,7 +94,7 @@ def build_supervisor_node(fast_llm):
         if _should_publish_graphic_note(user_msg) and "暂无文档" not in doc_info:
             plan = [
                 "ResearchAgent: 总结当前已加载文档中适合整理为图文笔记的核心 insight 和结论",
-                "NoteAgent: 基于前一步 insight 整理图文笔记、生成配图并发布到小红书",
+                "NoteAgent: 基于前一步 insight 整理图文笔记、生成封面图并准备小红书上传内容",
             ]
             print("[Supervisor] 路由决策：生成发布计划（ResearchAgent → NoteAgent）")
             return {"next": "ResearchAgent", "plan": plan, "plan_step": 0, "step_results": []}
