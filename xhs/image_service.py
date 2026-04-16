@@ -47,20 +47,33 @@ def _image_output_dir() -> Path:
     return Path(raw)
 
 
-def build_cover_prompt(note: XHSNoteDraft) -> str:
+def build_cover_prompt(
+    note: XHSNoteDraft,
+    cover_core_insight: str = "",
+    supporting_elements: list[str] | None = None,
+) -> str:
     image_plan = note.image_plan
-    props = "、".join(image_plan.props) if image_plan.props else "纸张便签、电脑界面卡片、重点标记"
+    props_list = list(supporting_elements or []) + list(image_plan.props)
+    unique_props: list[str] = []
+    seen_props: set[str] = set()
+    for item in props_list:
+        value = str(item).strip()
+        if value and value not in seen_props:
+            unique_props.append(value)
+            seen_props.add(value)
+    props = "、".join(unique_props) if unique_props else "纸张便签、电脑界面卡片、重点标记"
     style = "、".join(image_plan.style_keywords) if image_plan.style_keywords else "轻写实、明亮、干净、适合小红书封面"
     scene = image_plan.scene or "安静的桌面工作场景"
     main_subject = image_plan.main_subject or "一位正在整理知识点的年轻创作者"
-    pain_point = image_plan.pain_point_visual or f"混乱、卡住、反复试错，围绕问题“{note.core_problem}”"
-    solution = image_plan.solution_visual or f"清晰、被整理好的结果，突出“{note.solved_problem}”"
+    core_insight = cover_core_insight.strip() or note.solved_problem or note.core_problem
+    pain_point = image_plan.pain_point_visual or f"围绕洞察“{core_insight}”对应的研究对象、输入条件或待解决问题"
+    solution = image_plan.solution_visual or f"围绕洞察“{core_insight}”对应的关键机制、效果或输出结果"
     composition = image_plan.composition or "方形封面构图，主体居中，前后景有明显层次，对比明确"
     palette = image_plan.color_palette or "奶白、浅米、暖橙、浅青"
 
     return (
         "请生成一张适合小红书图文封面的 1:1 配图。"
-        f"主题是“{note.solved_problem or note.core_problem}”。"
+        f"需要表达的论文核心洞察是：{core_insight}。"
         f"主体：{main_subject}。"
         f"场景：{scene}。"
         f"画面中的问题状态：{pain_point}。"
@@ -72,6 +85,7 @@ def build_cover_prompt(note: XHSNoteDraft) -> str:
         "请重点通过人物动作、物件状态对比、信息被整理后的秩序感，来表现这篇内容解决了什么问题。"
         "不要依赖大段中文标题，不要满版海报字，不要做成纯文字封面。"
         "可以出现极少量无法辨认的小标签或界面元素，但不能让文字成为画面主体。"
+        "如果核心洞察本身是英文，请保留英文原文，不要翻译。"
         "整体要求清晰、生活化、有知识分享感，适合 512x512 正方形封面。"
     )
 
@@ -138,12 +152,18 @@ def generate_cover_images(
     note: XHSNoteDraft,
     image_count: int = 1,
     output_dir: Path | None = None,
+    cover_core_insight: str = "",
+    supporting_elements: list[str] | None = None,
 ) -> list[str]:
     api_key = _image_api_key()
     if not api_key:
         raise RuntimeError("未配置 DASHSCOPE_API_KEY（可回退使用 QWEN_IMAGE_API_KEY）。")
 
-    prompt = build_cover_prompt(note)
+    prompt = build_cover_prompt(
+        note,
+        cover_core_insight=cover_core_insight,
+        supporting_elements=supporting_elements,
+    )
     output_root = output_dir or _image_output_dir()
     output_root.mkdir(parents=True, exist_ok=True)
     _log_progress(

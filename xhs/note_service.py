@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -22,6 +23,54 @@ def _conversation_to_text(history: list[dict]) -> str:
             continue
         lines.append(f"[{index}] {role}：{content}")
     return "\n".join(lines)
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = [item.strip() for item in re.split(r"[.!?。！？]\s*", text.replace("\n", " ")) if item.strip()]
+    if parts:
+        return parts
+    return [item.strip() for item in text.splitlines() if item.strip()]
+
+
+def _fallback_cover_brief_from_source(source_materials: list[dict[str, str]]) -> dict[str, object]:
+    if not source_materials:
+        return {"core_insight": "", "supporting_elements": []}
+
+    excerpt = str(source_materials[0].get("excerpt", "")).strip()
+    title = str(source_materials[0].get("title", "")).strip().lower()
+    sentences = _split_sentences(excerpt)
+    core_insight = ". ".join(sentences[:2]).strip()
+    if core_insight and excerpt.count(".") > 0 and not core_insight.endswith("."):
+        core_insight += "."
+
+    text = f"{title}\n{excerpt}".lower()
+    elements: list[str] = []
+    keyword_map = [
+        ("reference", "reference image panel"),
+        ("style image", "style reference image"),
+        ("retrieval", "retrieved image grid"),
+        ("attention", "attention heatmap overlay"),
+        ("diffusion", "diffusion denoising trajectory"),
+        ("style transfer", "content image and stylized result"),
+        ("memory", "memory cards or note blocks"),
+    ]
+    for keyword, visual in keyword_map:
+        if keyword in text and visual not in elements:
+            elements.append(visual)
+
+    if not elements:
+        elements = ["paper page highlights", "diagram card", "before-and-after comparison"]
+
+    return {
+        "core_insight": core_insight or excerpt[:220].strip(),
+        "supporting_elements": elements[:4],
+        "main_subject": "paper mechanism illustration with result comparison",
+        "scene": "editorial science cover scene focused on the paper's method and outcome",
+        "composition": "central mechanism with supporting visual elements around it",
+        "pain_point_visual": "the paper's original problem setting, input condition, or challenge",
+        "solution_visual": "the proposed method, key mechanism, or improved output result",
+        "style_keywords": ["editorial science cover", "clean visual explanation", "high clarity"],
+    }
 
 
 def _extract_json_payload(raw: str) -> dict:
@@ -91,8 +140,9 @@ def _repair_note(note: XHSNoteDraft) -> XHSNoteDraft:
 
 
 class XHSNoteService:
-    def __init__(self, llm):
+    def __init__(self, llm, cover_source_provider=None):
         self.llm = llm
+        self.cover_source_provider = cover_source_provider
 
     def _build_generation_prompt(self, history: list[dict]) -> str:
         conversation = _conversation_to_text(history)
@@ -154,6 +204,108 @@ class XHSNoteService:
         _log_progress(f"笔记草稿就绪，标题={repaired.title}")
         return repaired
 
+    def _get_cover_source_materials(self) -> list[dict[str, str]]:
+        if self.cover_source_provider is None:
+            return []
+        try:
+            materials = self.cover_source_provider() or []
+        except Exception as exc:
+            _log_progress(f"获取封面源材料失败：{exc}")
+            return []
+        normalized: list[dict[str, str]] = []
+        for item in materials:
+            if not isinstance(item, dict):
+                continue
+            excerpt = str(item.get("excerpt", "")).strip()
+            if not excerpt:
+                continue
+            normalized.append(
+                {
+                    "source": str(item.get("source", "")).strip(),
+                    "title": str(item.get("title", "")).strip(),
+                    "excerpt": excerpt,
+                }
+            )
+        return normalized
+
+    def _build_cover_brief(
+        self,
+        note: XHSNoteDraft,
+        source_materials: list[dict[str, str]],
+    ) -> dict[str, object]:
+        if not source_materials:
+            return {
+                "core_insight": note.solved_problem or note.cover_hook or note.summary,
+                "supporting_elements": list(note.image_plan.props),
+            }
+
+        source_text = "\n\n".join(
+            f"[{item['title'] or item['source']}]\n{item['excerpt']}" for item in source_materials
+        )
+        prompt = (
+            "你是一名负责论文封面视觉策划的编辑。\n"
+            "请只根据给定论文原文的 abstract 或 introduction 片段，提炼适合文生图封面的核心洞察。\n"
+            "不要使用对话总结，不要补充原文之外的结论。\n"
+            "如果原文是英文，core_insight 必须保持英文；如果原文是中文，保持中文。\n"
+            "输出 JSON，不要解释：\n"
+            "{\n"
+            '  "core_insight": "1-2句，保留原语言，表达论文最核心洞察",\n'
+            '  "supporting_elements": ["2-5个辅助理解该洞察的视觉元素，不要只是重复文字"],\n'
+            '  "pain_point_visual": "研究对象、输入条件或待解决问题的视觉表现",\n'
+            '  "solution_visual": "关键机制、效果或输出结果的视觉表现",\n'
+            '  "main_subject": "画面主体",\n'
+            '  "scene": "适合封面的场景",\n'
+            '  "composition": "构图",\n'
+            '  "style_keywords": ["最多4个风格关键词"]\n'
+            "}\n\n"
+            f"论文原文片段：\n{source_text}"
+        )
+
+        try:
+            _log_progress("调用 LLM 从原文摘要/引言提炼封面核心洞察")
+            raw = self.llm.invoke(prompt).content
+            data = _extract_json_payload(str(raw))
+        except Exception as exc:
+            _log_progress(f"原文洞察提炼失败，回退到原文片段启发式提炼：{exc}")
+            fallback = _fallback_cover_brief_from_source(source_materials)
+            if fallback.get("core_insight"):
+                note.image_plan.main_subject = str(fallback.get("main_subject", "")).strip() or note.image_plan.main_subject
+                note.image_plan.scene = str(fallback.get("scene", "")).strip() or note.image_plan.scene
+                note.image_plan.composition = str(fallback.get("composition", "")).strip() or note.image_plan.composition
+                note.image_plan.pain_point_visual = (
+                    str(fallback.get("pain_point_visual", "")).strip() or note.image_plan.pain_point_visual
+                )
+                note.image_plan.solution_visual = (
+                    str(fallback.get("solution_visual", "")).strip() or note.image_plan.solution_visual
+                )
+                fallback_styles = [str(item).strip() for item in fallback.get("style_keywords", []) if str(item).strip()]
+                if fallback_styles:
+                    note.image_plan.style_keywords = fallback_styles
+                return fallback
+            return {
+                "core_insight": note.solved_problem or note.cover_hook or note.summary,
+                "supporting_elements": list(note.image_plan.props),
+            }
+
+        core_insight = str(data.get("core_insight", "")).strip() or note.solved_problem or note.summary
+        supporting = [str(item).strip() for item in data.get("supporting_elements", []) if str(item).strip()]
+        note.image_plan.main_subject = str(data.get("main_subject", "")).strip() or note.image_plan.main_subject
+        note.image_plan.scene = str(data.get("scene", "")).strip() or note.image_plan.scene
+        note.image_plan.composition = str(data.get("composition", "")).strip() or note.image_plan.composition
+        note.image_plan.pain_point_visual = (
+            str(data.get("pain_point_visual", "")).strip() or note.image_plan.pain_point_visual
+        )
+        note.image_plan.solution_visual = (
+            str(data.get("solution_visual", "")).strip() or note.image_plan.solution_visual
+        )
+        extracted_styles = [str(item).strip() for item in data.get("style_keywords", []) if str(item).strip()]
+        if extracted_styles:
+            note.image_plan.style_keywords = extracted_styles
+        return {
+            "core_insight": core_insight,
+            "supporting_elements": supporting,
+        }
+
     def generate_note_artifact(
         self,
         history: list[dict],
@@ -166,8 +318,18 @@ class XHSNoteService:
         overall_start = time.perf_counter()
         _log_progress("进入 generate_note_artifact")
         note = self.generate_note(history)
+        source_materials = self._get_cover_source_materials()
+        if source_materials:
+            _log_progress(f"找到 {len(source_materials)} 份封面源材料，优先使用原文摘要/引言")
+        else:
+            _log_progress("未找到原文摘要/引言源材料，回退使用笔记结论")
+        cover_brief = self._build_cover_brief(note, source_materials)
         _log_progress("开始生成封面 prompt")
-        image_prompt = build_cover_prompt(note)
+        image_prompt = build_cover_prompt(
+            note,
+            cover_core_insight=str(cover_brief.get("core_insight", "")).strip(),
+            supporting_elements=list(cover_brief.get("supporting_elements", []) or []),
+        )
         negative_prompt = build_cover_negative_prompt(note)
         _log_progress(f"封面 prompt 已生成，长度={len(image_prompt)}")
         target_dir = Path(output_dir) if output_dir else None
@@ -177,7 +339,13 @@ class XHSNoteService:
         if generate_images:
             try:
                 _log_progress("开始调用图片生成服务")
-                image_paths = generate_cover_images(note, image_count=image_count, output_dir=target_dir)
+                image_paths = generate_cover_images(
+                    note,
+                    image_count=image_count,
+                    output_dir=target_dir,
+                    cover_core_insight=str(cover_brief.get("core_insight", "")).strip(),
+                    supporting_elements=list(cover_brief.get("supporting_elements", []) or []),
+                )
                 _log_progress(f"图片生成完成，数量={len(image_paths)}")
             except Exception as exc:
                 image_error = str(exc)
@@ -187,6 +355,8 @@ class XHSNoteService:
             note=note,
             image_prompt=image_prompt,
             image_negative_prompt=negative_prompt,
+            cover_source_materials=source_materials,
+            cover_core_insight=str(cover_brief.get("core_insight", "")).strip(),
             image_paths=image_paths,
             image_error=image_error,
             mcp_args=build_mcp_publish_args(

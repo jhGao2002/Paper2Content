@@ -7,6 +7,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from config import get_embeddings, get_fast_llm, get_llm
 from document.loader import load_document
+from document.source_excerpt import collect_cover_source_materials
 from graph.builder import build_graph
 from memory.compression import compress_window
 from memory.store import build_memory_context, init_vector_stores
@@ -38,7 +39,10 @@ class MultiAgentApp:
         self.loaded_docs: list[str] = []
         self._first_message = True
         self.last_retrieved_docs = ""
-        self.xhs_note_service = XHSNoteService(llm=self.llm)
+        self.xhs_note_service = XHSNoteService(
+            llm=self.llm,
+            cover_source_provider=self._get_cover_source_materials,
+        )
 
         conn = sqlite3.connect(get_db_path(), check_same_thread=False)
         self._db_conn = SqliteSaver(conn)
@@ -59,6 +63,13 @@ class MultiAgentApp:
 
     def _record_retrieval(self, content: str) -> None:
         self.last_retrieved_docs = content
+
+    def _get_cover_source_materials(self) -> list[dict]:
+        return collect_cover_source_materials(
+            self.pdf_store,
+            self.loaded_docs,
+            user_id=self.user_id,
+        )
 
     def get_chat_history(self) -> list:
         config = {"configurable": {"thread_id": self.session_id}}
@@ -158,5 +169,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7861,
         share=_env_flag("GRADIO_SHARE", False),
-        quiet=True,
+        quiet=False,
     )

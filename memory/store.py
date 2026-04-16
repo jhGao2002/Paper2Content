@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 
 VECTOR_ROOT = Path(os.getenv("FAISS_INDEX_ROOT", "vectorstores"))
 EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "64"))
+_GPU_CAPABILITY_WARNED = False
 
 
 def _normalize(vectors: np.ndarray) -> np.ndarray:
@@ -34,6 +35,13 @@ def _match_filter(metadata: dict, filter_expr: dict | None) -> bool:
     return True
 
 
+def _faiss_gpu_available() -> bool:
+    return all(
+        hasattr(faiss, attr)
+        for attr in ("StandardGpuResources", "index_cpu_to_gpu", "index_gpu_to_cpu")
+    )
+
+
 class FaissVectorStore:
     def __init__(self, embedding, collection_name: str, persist_root: Path | None = None):
         self.embedding = embedding
@@ -42,12 +50,17 @@ class FaissVectorStore:
         self.persist_dir = self.persist_root / collection_name
         self.index_path = self.persist_dir / "index.faiss"
         self.docs_path = self.persist_dir / "documents.json"
-        self.use_gpu = os.getenv("FAISS_USE_GPU", "1").strip().lower() not in {"0", "false", "no"}
+        requested_gpu = os.getenv("FAISS_USE_GPU", "1").strip().lower() not in {"0", "false", "no"}
+        self.use_gpu = requested_gpu and _faiss_gpu_available()
         self.gpu_device = int(os.getenv("FAISS_GPU_DEVICE", "0"))
         self._gpu_resources = None
         self._docs: list[Document] = []
         self._index = None
         self._dim = None
+        global _GPU_CAPABILITY_WARNED
+        if requested_gpu and not self.use_gpu and not _GPU_CAPABILITY_WARNED:
+            print("[FAISS] 当前安装的 faiss 不支持 GPU，自动使用 CPU 索引。")
+            _GPU_CAPABILITY_WARNED = True
         self._load()
 
     @property
@@ -104,6 +117,16 @@ class FaissVectorStore:
     def list_sources(self) -> list[str]:
         return sorted({doc.metadata.get("source", "") for doc in self._docs if doc.metadata.get("source")})
 
+    def get_documents(self, filter: dict | None = None, limit: int | None = None) -> list[Document]:
+        results: list[Document] = []
+        for doc in self._docs:
+            if not _match_filter(doc.metadata, filter):
+                continue
+            results.append(deepcopy(doc))
+            if limit is not None and len(results) >= limit:
+                break
+        return results
+
     def _create_index(self, dim: int):
         cpu_index = faiss.IndexFlatIP(dim)
         if not self.use_gpu:
@@ -119,6 +142,8 @@ class FaissVectorStore:
     def _to_cpu_index(self):
         if self._index is None:
             return None
+        if not hasattr(faiss, "index_gpu_to_cpu"):
+            return self._index
         try:
             return faiss.index_gpu_to_cpu(self._index)
         except Exception:

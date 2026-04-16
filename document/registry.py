@@ -42,6 +42,10 @@ def get_all_documents() -> list:
     return sorted(data.values(), key=lambda x: x["date_added"], reverse=True)
 
 
+def get_document(filename: str) -> dict | None:
+    return _load().get(filename)
+
+
 def is_registered(filename: str) -> bool:
     return filename in _load()
 

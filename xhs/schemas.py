@@ -100,6 +100,8 @@ class XHSNoteArtifact:
     note: XHSNoteDraft
     image_prompt: str
     image_negative_prompt: str
+    cover_source_materials: list[dict[str, str]] = field(default_factory=list)
+    cover_core_insight: str = ""
     image_paths: list[str] = field(default_factory=list)
     image_error: str = ""
     mcp_args: XHSMCPPublishArgs | None = None
