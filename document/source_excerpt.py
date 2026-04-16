@@ -88,9 +88,9 @@ def _select_source_excerpt_from_docs(docs: list) -> str:
 
 
 def collect_cover_source_materials(pdf_store, source_names: list[str], user_id: str = "") -> list[dict]:
-    target_sources = list(source_names)
+    target_sources = list(source_names[:1])
     if not target_sources:
-        target_sources = pdf_store.list_sources()[:3]
+        target_sources = pdf_store.list_sources()[:1]
 
     materials: list[dict] = []
     for source in target_sources:

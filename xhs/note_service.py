@@ -32,6 +32,26 @@ def _split_sentences(text: str) -> list[str]:
     return [item.strip() for item in text.splitlines() if item.strip()]
 
 
+def _extract_user_specified_insight(history: list[dict]) -> str:
+    patterns = [
+        r"(?:我的创新idea|我的创新想法|我的idea|我自己的idea|我的insight|核心insight|核心洞察|创新点)\s*[：:]\s*(.+)",
+        r"(?:请用|就用|按|使用)\s*(.+?)\s*(?:作为|当作)\s*(?:insight|核心洞察|创新idea|idea)",
+    ]
+    for item in reversed(history):
+        if item.get("role") != "user":
+            continue
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, content, flags=re.IGNORECASE)
+            if match:
+                insight = match.group(1).strip(" \n\r\t,，。；;")
+                if insight:
+                    return insight
+    return ""
+
+
 def _fallback_cover_brief_from_source(source_materials: list[dict[str, str]]) -> dict[str, object]:
     if not source_materials:
         return {"core_insight": "", "supporting_elements": []}
@@ -228,11 +248,40 @@ class XHSNoteService:
             )
         return normalized
 
+    def _translate_to_chinese_if_needed(self, text: str) -> str:
+        raw = text.strip()
+        if not raw:
+            return ""
+        if re.search(r"[\u4e00-\u9fff]", raw):
+            return raw
+
+        prompt = (
+            "请将下面这段论文核心洞察忠实翻译成自然、简洁的中文。"
+            "只输出翻译结果，不要解释，不要加引号。\n\n"
+            f"{raw}"
+        )
+        try:
+            _log_progress("检测到英文核心洞察，开始翻译成中文")
+            translated = str(self.llm.invoke(prompt).content).strip()
+            return translated or raw
+        except Exception as exc:
+            _log_progress(f"英文洞察翻译失败，暂时保留原文：{exc}")
+            return raw
+
     def _build_cover_brief(
         self,
         note: XHSNoteDraft,
+        history: list[dict],
         source_materials: list[dict[str, str]],
     ) -> dict[str, object]:
+        user_insight = _extract_user_specified_insight(history)
+        if user_insight:
+            _log_progress("检测到用户明确指定的 insight，封面提炼优先使用用户创新 idea")
+            return {
+                "core_insight": user_insight,
+                "supporting_elements": list(note.image_plan.props),
+            }
+
         if not source_materials:
             return {
                 "core_insight": note.solved_problem or note.cover_hook or note.summary,
@@ -246,10 +295,10 @@ class XHSNoteService:
             "你是一名负责论文封面视觉策划的编辑。\n"
             "请只根据给定论文原文的 abstract 或 introduction 片段，提炼适合文生图封面的核心洞察。\n"
             "不要使用对话总结，不要补充原文之外的结论。\n"
-            "如果原文是英文，core_insight 必须保持英文；如果原文是中文，保持中文。\n"
+            "如果原文是英文，core_insight 必须翻译成忠实、简洁的中文；如果原文是中文，保持中文。\n"
             "输出 JSON，不要解释：\n"
             "{\n"
-            '  "core_insight": "1-2句，保留原语言，表达论文最核心洞察",\n'
+            '  "core_insight": "1-2句中文，表达论文最核心洞察",\n'
             '  "supporting_elements": ["2-5个辅助理解该洞察的视觉元素，不要只是重复文字"],\n'
             '  "pain_point_visual": "研究对象、输入条件或待解决问题的视觉表现",\n'
             '  "solution_visual": "关键机制、效果或输出结果的视觉表现",\n'
@@ -269,6 +318,9 @@ class XHSNoteService:
             _log_progress(f"原文洞察提炼失败，回退到原文片段启发式提炼：{exc}")
             fallback = _fallback_cover_brief_from_source(source_materials)
             if fallback.get("core_insight"):
+                fallback["core_insight"] = self._translate_to_chinese_if_needed(
+                    str(fallback.get("core_insight", "")).strip()
+                )
                 note.image_plan.main_subject = str(fallback.get("main_subject", "")).strip() or note.image_plan.main_subject
                 note.image_plan.scene = str(fallback.get("scene", "")).strip() or note.image_plan.scene
                 note.image_plan.composition = str(fallback.get("composition", "")).strip() or note.image_plan.composition
@@ -288,6 +340,7 @@ class XHSNoteService:
             }
 
         core_insight = str(data.get("core_insight", "")).strip() or note.solved_problem or note.summary
+        core_insight = self._translate_to_chinese_if_needed(core_insight)
         supporting = [str(item).strip() for item in data.get("supporting_elements", []) if str(item).strip()]
         note.image_plan.main_subject = str(data.get("main_subject", "")).strip() or note.image_plan.main_subject
         note.image_plan.scene = str(data.get("scene", "")).strip() or note.image_plan.scene
@@ -320,10 +373,10 @@ class XHSNoteService:
         note = self.generate_note(history)
         source_materials = self._get_cover_source_materials()
         if source_materials:
-            _log_progress(f"找到 {len(source_materials)} 份封面源材料，优先使用原文摘要/引言")
+            _log_progress(f"找到 {len(source_materials)} 份封面源材料，默认使用第一篇已加载文档")
         else:
             _log_progress("未找到原文摘要/引言源材料，回退使用笔记结论")
-        cover_brief = self._build_cover_brief(note, source_materials)
+        cover_brief = self._build_cover_brief(note, history, source_materials)
         _log_progress("开始生成封面 prompt")
         image_prompt = build_cover_prompt(
             note,
