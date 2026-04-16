@@ -117,14 +117,8 @@ def run_variant(
         "variant_dir": str(variant_dir.relative_to(run_dir)),
     }
 
-    if answers_path.exists():
-        print(f"=== {variant.display_name}: 复用已有回答缓存 ===")
-        return (
-            load_json(answers_path),
-            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-            metadata,
-            variant_dir,
-        )
+    cached_records = _load_cached_answers(answers_path)
+    records_map = {_build_answer_key(item): item for item in cached_records}
 
     store = FaissVectorStore(
         embedding=embeddings,
@@ -139,25 +133,41 @@ def run_variant(
         result = pipeline.load_document(pdf_path)
         print(f"  已加载 {result['document']}，chunk 数: {result['chunk_count']}")
 
+    pending_pairs = [pair for pair in qa_pairs if _build_answer_key(pair) not in records_map]
+    if not pending_pairs:
+        print(f"=== {variant.display_name}: 复用已有回答缓存 ===")
+        return (
+            _order_records_by_dataset(list(records_map.values()), qa_pairs),
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            metadata,
+            variant_dir,
+        )
+
     print(f"=== {variant.display_name}: 生成回答 ===")
+    if cached_records:
+        print(f"  已复用 {len(cached_records)}/{len(qa_pairs)} 条缓存回答")
+
     with get_usage_metadata_callback() as cb:
-        records = []
         total = len(qa_pairs)
         for idx, pair in enumerate(qa_pairs, start=1):
+            key = _build_answer_key(pair)
+            if key in records_map:
+                print(f"  已完成 {idx}/{total}（缓存）")
+                continue
+
             answer, context = pipeline.ask(pair["question"])
-            records.append(
-                {
-                    "question": pair["question"],
-                    "ground_truth": pair["ground_truth"],
-                    "answer": answer,
-                    "contexts": [context],
-                    "source": pair.get("source", ""),
-                }
-            )
+            records_map[key] = {
+                "question": pair["question"],
+                "ground_truth": pair["ground_truth"],
+                "answer": answer,
+                "contexts": [context],
+                "source": pair.get("source", ""),
+            }
+            save_json(answers_path, _order_records_by_dataset(list(records_map.values()), qa_pairs))
             print(f"  已完成 {idx}/{total}")
 
     usage_summary = normalize_usage(cb.usage_metadata)
-    save_json(answers_path, records)
+    records = _order_records_by_dataset(list(records_map.values()), qa_pairs)
     return records, usage_summary, metadata, variant_dir
 
 
@@ -254,3 +264,38 @@ def _build_summary(
         "metadata": metadata,
         "metrics_file": str(metrics_path.relative_to(run_dir)),
     }
+
+
+def _build_answer_key(item: dict) -> tuple[str, str, str]:
+    return (
+        str(item.get("question", "")).strip(),
+        str(item.get("ground_truth", "")).strip(),
+        str(item.get("source", "")).strip(),
+    )
+
+
+def _load_cached_answers(answers_path: Path) -> list[dict]:
+    if not answers_path.exists():
+        return []
+    payload = load_json(answers_path)
+    if not isinstance(payload, list):
+        return []
+
+    cleaned = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if "question" not in item or "ground_truth" not in item or "answer" not in item:
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def _order_records_by_dataset(records: list[dict], qa_pairs: list[dict]) -> list[dict]:
+    record_map = {_build_answer_key(item): item for item in records}
+    ordered = []
+    for pair in qa_pairs:
+        key = _build_answer_key(pair)
+        if key in record_map:
+            ordered.append(record_map[key])
+    return ordered
