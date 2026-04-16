@@ -21,31 +21,31 @@ OUTPUT_PATH = ROOT / "result" / "eval_dataset.json"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="从 eval/papers_example 中的论文自动生成评测集。"
+        description="从 eval/papers_example 中的论文生成 RAG 评测集。"
     )
     parser.add_argument(
         "--papers-dir",
         type=Path,
         default=PAPERS_DIR,
-        help="论文目录，默认是 eval/papers_example",
+        help="论文 PDF 目录，默认是 eval/papers_example。",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=OUTPUT_PATH,
-        help="输出 JSON 文件路径，默认是 result/eval_dataset.json",
+        help="输出 JSON 路径，默认是 result/eval_dataset.json。",
     )
     parser.add_argument(
         "--questions-per-paper",
         type=int,
-        default=8,
-        help="每篇论文生成的问题数量",
+        default=5,
+        help="每篇论文生成的问答数量，默认 5。",
     )
     parser.add_argument(
         "--max-chars",
         type=int,
         default=12000,
-        help="每篇论文送入 LLM 的最大字符数",
+        help="从论文开头截取给 LLM 的最大字符数，默认 12000。",
     )
     return parser.parse_args()
 
@@ -67,26 +67,25 @@ def extract_json_block(raw_text: str) -> str:
     start = text.find("[")
     end = text.rfind("]")
     if start == -1 or end == -1 or end < start:
-        raise ValueError("LLM 输出中未找到 JSON 数组")
+        raise ValueError("LLM 返回内容中没有找到合法 JSON 数组")
     return text[start : end + 1]
 
 
 def build_prompt(filename: str, excerpt: str, questions_per_paper: int) -> str:
-    return f"""你现在要为一篇学术论文生成 RAG 评测集。
+    return f"""你是学术论文评测集构造助手。请基于论文内容生成适合 RAG 评测的问答样本。
 
-任务要求：
-1. 基于论文内容，生成 {questions_per_paper} 条高质量问答样本。
-2. 每条样本必须是一个 JSON 对象，包含字段：
-   - "question": 用户可能会问的问题
-   - "ground_truth": 简洁但完整的标准答案
-3. 所有样本组成一个 JSON 数组输出。
-4. 不要输出 Markdown，不要输出解释，不要输出代码块标记。
-5. 问题要尽量可核验，优先覆盖：研究目标、核心方法、关键模块、实验结论、与基线差异、适用边界。
-6. 每条样本只评估一个核心点，避免一个问题里塞多个子问题。
-7. 如果论文信息不足，不要编造。
+要求：
+1. 围绕论文的研究问题、方法、实验设置、关键结论和局限性，生成 {questions_per_paper} 条样本。
+2. 输出必须是 JSON 数组，每个元素只包含两个字段：
+   - "question"
+   - "ground_truth"
+3. 不要输出 JSON 之外的解释。
+4. 问题要具体、可回答，避免过于宽泛。
+5. ground_truth 要尽量忠实于论文内容，长度适中，适合作为评测参考答案。
+6. 如果论文开头信息不足，也只能基于提供内容生成，不要编造。
 
 论文文件名：{filename}
-论文内容节选：
+论文节选：
 {excerpt}
 """
 
@@ -128,11 +127,11 @@ def generate_dataset_from_papers(
     max_chars: int,
 ) -> list[dict[str, str]]:
     if not papers_dir.exists():
-        raise FileNotFoundError(f"论文目录不存在: {papers_dir}")
+        raise FileNotFoundError(f"论文目录不存在：{papers_dir}")
 
     pdf_files = collect_pdf_files(papers_dir)
     if not pdf_files:
-        raise FileNotFoundError(f"未在目录中找到 PDF 文件: {papers_dir}")
+        raise FileNotFoundError(f"未在目录中找到 PDF 文件：{papers_dir}")
 
     llm = get_llm()
     dataset = []
@@ -154,8 +153,8 @@ def generate_dataset_from_papers(
         json.dump(dataset, f, ensure_ascii=False, indent=2)
 
     print(f"评测集已写入: {output_path}")
-    print(f"样本总数: {len(dataset)}")
-    print("建议人工抽查 10% 到 20% 的样本，再用于正式评测。")
+    print(f"总样本数: {len(dataset)}")
+    print("建议人工抽查 10% 到 20% 的样本，确认问题和标准答案质量。")
     return dataset
 
 
