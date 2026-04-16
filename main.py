@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 import sqlite3
 
@@ -10,6 +11,12 @@ from graph.builder import build_graph
 from memory.compression import compress_window
 from memory.store import build_memory_context, init_vector_stores
 from session.manager import create_session, get_db_path, update_session_title
+from xhs.note_service import XHSNoteService
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = str(default) if os.getenv(name) is None else os.getenv(name, str(default))
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class MultiAgentApp:
@@ -31,6 +38,7 @@ class MultiAgentApp:
         self.loaded_docs: list[str] = []
         self._first_message = True
         self.last_retrieved_docs = ""
+        self.xhs_note_service = XHSNoteService(llm=self.llm)
 
         conn = sqlite3.connect(get_db_path(), check_same_thread=False)
         self._db_conn = SqliteSaver(conn)
@@ -118,9 +126,35 @@ class MultiAgentApp:
                 self.loaded_docs.append(doc_name)
         return result
 
+    def generate_xhs_note(
+        self,
+        generate_images: bool = False,
+        image_count: int = 1,
+        output_dir: str | None = None,
+        is_original: bool = True,
+        visibility: str = "公开可见",
+    ) -> dict:
+        history = self.get_chat_history()
+        return self.xhs_note_service.generate_note_artifact(
+            history=history,
+            generate_images=generate_images,
+            image_count=image_count,
+            output_dir=output_dir,
+            is_original=is_original,
+            visibility=visibility,
+        )
+
+    def publish_xhs_note(self, artifact: dict) -> dict:
+        return self.xhs_note_service.publish_generated_note(artifact)
+
 
 if __name__ == "__main__":
     from ui.gradio_app import create_gradio_ui
 
     demo = create_gradio_ui(app_factory=MultiAgentApp)
-    demo.launch(server_name="0.0.0.0", server_port=7861, share=False)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7861,
+        share=_env_flag("GRADIO_SHARE", False),
+        quiet=True,
+    )
