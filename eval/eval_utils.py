@@ -65,6 +65,53 @@ def compute_f1(precision: float, recall: float) -> float:
     return 2 * (precision * recall) / (precision + recall)
 
 
+def build_summary_dataframe(summaries: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "variant": summary["variant"],
+                "display_name": summary["display_name"],
+                "sample_count": summary["sample_count"],
+                "context_precision": summary["context_precision"],
+                "context_recall": summary["context_recall"],
+                "retrieval_f1": summary["retrieval_f1"],
+                "answer_correctness": summary["answer_correctness"],
+                "faithfulness": summary["faithfulness"],
+                "generation_total_tokens": summary["generation_total_tokens"],
+                "judge_total_tokens": summary["judge_total_tokens"],
+                "variant_dir": summary["metadata"]["variant_dir"],
+            }
+            for summary in summaries
+        ]
+    )
+
+
+def build_token_dataframe(token_rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(token_rows)
+
+
+def persist_variant_progress(
+    run_dir: Path,
+    beta: bool,
+    dataset_generation_usage: dict[str, int],
+    variant_summaries: list[dict],
+    token_rows: list[dict],
+) -> None:
+    summary_df = build_summary_dataframe(variant_summaries)
+    token_df = build_token_dataframe(token_rows)
+    write_dataframe(summary_df, run_dir / "summaries" / "variant_metrics_summary.csv")
+    write_dataframe(token_df, run_dir / "summaries" / "variant_token_summary.csv")
+    save_json(
+        run_dir / "summaries" / "run_manifest.json",
+        {
+            "generated_at": datetime.now().isoformat(timespec="minutes"),
+            "beta": beta,
+            "dataset_generation_tokens": dataset_generation_usage,
+            "variants": variant_summaries,
+        },
+    )
+
+
 def append_results_to_readme(
     summaries: list[dict],
     dataset_size: int,

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
 
-import pandas as pd
 from dotenv import load_dotenv
 
 from eval_config import ROOT, VARIANTS, parse_args
@@ -13,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from eval_runner import ensure_eval_dataset, evaluate_variant, run_variant, select_pdf_files  # noqa: E402
-from eval_utils import append_results_to_readme, copy_run_to_latest, create_run_dirs, save_json, write_dataframe  # noqa: E402
+from eval_utils import append_results_to_readme, copy_run_to_latest, create_run_dirs, persist_variant_progress  # noqa: E402
 
 
 def main() -> None:
@@ -71,37 +69,13 @@ def main() -> None:
                 "judge_total_tokens": summary["judge_total_tokens"],
             }
         )
-
-    summary_df = pd.DataFrame(
-        [
-            {
-                "variant": summary["variant"],
-                "display_name": summary["display_name"],
-                "sample_count": summary["sample_count"],
-                "context_precision": summary["context_precision"],
-                "context_recall": summary["context_recall"],
-                "retrieval_f1": summary["retrieval_f1"],
-                "answer_correctness": summary["answer_correctness"],
-                "faithfulness": summary["faithfulness"],
-                "generation_total_tokens": summary["generation_total_tokens"],
-                "judge_total_tokens": summary["judge_total_tokens"],
-                "variant_dir": summary["metadata"]["variant_dir"],
-            }
-            for summary in variant_summaries
-        ]
-    )
-    token_df = pd.DataFrame(token_rows)
-    write_dataframe(summary_df, run_dir / "summaries" / "variant_metrics_summary.csv")
-    write_dataframe(token_df, run_dir / "summaries" / "variant_token_summary.csv")
-    save_json(
-        run_dir / "summaries" / "run_manifest.json",
-        {
-            "generated_at": datetime.now().isoformat(timespec="minutes"),
-            "beta": args.beta,
-            "dataset_generation_tokens": dataset_generation_usage,
-            "variants": variant_summaries,
-        },
-    )
+        persist_variant_progress(
+            run_dir=run_dir,
+            beta=args.beta,
+            dataset_generation_usage=dataset_generation_usage,
+            variant_summaries=variant_summaries,
+            token_rows=token_rows,
+        )
 
     copy_run_to_latest(run_dir, latest_dir)
     append_results_to_readme(
