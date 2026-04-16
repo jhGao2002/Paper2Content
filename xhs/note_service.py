@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from xhs.image_service import build_cover_negative_prompt, build_cover_prompt, generate_cover_images
 from xhs.publish_service import build_mcp_publish_args, publish_note_via_mcp_sync
 from xhs.schemas import XHSNoteArtifact, XHSNoteDraft
+
+
+def _log_progress(message: str) -> None:
+    print(f"[XHSNoteService] {message}", flush=True)
 
 
 def _conversation_to_text(history: list[dict]) -> str:
@@ -134,13 +139,20 @@ class XHSNoteService:
         if not history:
             raise ValueError("当前会话还没有可整理的问答记录。")
 
+        _log_progress(f"开始整理笔记正文，history条数={len(history)}")
         prompt = self._build_generation_prompt(history)
         try:
+            llm_start = time.perf_counter()
+            _log_progress("调用 LLM 生成结构化笔记 JSON")
             raw = self.llm.invoke(prompt).content
             note = XHSNoteDraft.from_dict(_extract_json_payload(str(raw)))
+            _log_progress(f"LLM 笔记生成完成，耗时={time.perf_counter() - llm_start:.2f}s")
         except Exception:
+            _log_progress("LLM 笔记生成失败，回退到规则草稿")
             note = _fallback_note(history)
-        return _repair_note(note)
+        repaired = _repair_note(note)
+        _log_progress(f"笔记草稿就绪，标题={repaired.title}")
+        return repaired
 
     def generate_note_artifact(
         self,
@@ -151,18 +163,25 @@ class XHSNoteService:
         is_original: bool = True,
         visibility: str = "公开可见",
     ) -> dict:
+        overall_start = time.perf_counter()
+        _log_progress("进入 generate_note_artifact")
         note = self.generate_note(history)
+        _log_progress("开始生成封面 prompt")
         image_prompt = build_cover_prompt(note)
         negative_prompt = build_cover_negative_prompt(note)
+        _log_progress(f"封面 prompt 已生成，长度={len(image_prompt)}")
         target_dir = Path(output_dir) if output_dir else None
         image_paths: list[str] = []
         image_error = ""
 
         if generate_images:
             try:
+                _log_progress("开始调用图片生成服务")
                 image_paths = generate_cover_images(note, image_count=image_count, output_dir=target_dir)
+                _log_progress(f"图片生成完成，数量={len(image_paths)}")
             except Exception as exc:
                 image_error = str(exc)
+                _log_progress(f"图片生成失败：{image_error}")
 
         artifact = XHSNoteArtifact(
             note=note,
@@ -177,9 +196,11 @@ class XHSNoteService:
                 visibility=visibility,
             ),
         )
+        _log_progress(f"artifact 构建完成，总耗时={time.perf_counter() - overall_start:.2f}s")
         return artifact.to_dict()
 
     def publish_generated_note(self, artifact: dict) -> dict:
+        _log_progress("开始组装发布参数")
         mcp_args = artifact.get("mcp_args") or {}
         note = artifact.get("note") or {}
         publish_args = build_mcp_publish_args(
@@ -188,4 +209,5 @@ class XHSNoteService:
             is_original=bool(mcp_args.get("is_original", True)),
             visibility=str(mcp_args.get("visibility", "公开可见")),
         )
+        _log_progress("开始调用小红书 MCP 发布")
         return publish_note_via_mcp_sync(publish_args)

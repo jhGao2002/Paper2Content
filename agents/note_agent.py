@@ -4,6 +4,8 @@
 # save_note：将用户明确要求记录的内容保存为笔记。
 # publish_graphic_note：将当前会话中的文献 insight 整理为小红书图文笔记、生成配图并自动发布。
 
+import time
+
 from agents.base import build_sub_agent
 from langchain_core.tools import tool
 
@@ -27,6 +29,10 @@ def _build_note_history(note_history_provider, extra_context: str) -> list[dict]
     if extra:
         history.append({"role": "assistant", "content": extra})
     return history
+
+
+def _log_progress(message: str) -> None:
+    print(f"  [NoteAgent][TOOL] {message}", flush=True)
 
 
 def make_note_agent(
@@ -71,7 +77,7 @@ def make_note_agent(
     @tool
     def save_note(content: str) -> str:
         """将用户提供的内容保存为学习笔记到本会话记忆库。"""
-        print(f"  [NoteAgent][TOOL] save_note: {content[:50]}")
+        _log_progress(f"save_note: {content[:50]}")
         save_fact(memory_store, content, user_id, session_id, fact_type="note")
         stats["notes_added"] += 1
         return f"笔记已保存：{content[:50]}..."
@@ -86,7 +92,9 @@ def make_note_agent(
         if not history:
             return "当前会话里还没有可整理的问答记录，暂时无法发布图文笔记。"
 
-        print("  [NoteAgent][TOOL] publish_graphic_note 开始执行")
+        start_time = time.perf_counter()
+        _log_progress(f"publish_graphic_note 开始执行，history条数={len(history)}，visibility={visibility}")
+        _log_progress("阶段 1/3：开始整理图文笔记内容")
         artifact = note_service.generate_note_artifact(
             history=history,
             generate_images=True,
@@ -94,8 +102,11 @@ def make_note_agent(
             visibility=visibility,
         )
         note = artifact["note"]
+        elapsed = time.perf_counter() - start_time
+        _log_progress(f"阶段 1/3 完成，标题={note['title']}，耗时={elapsed:.2f}s")
 
         if artifact["image_error"] or not artifact["image_paths"]:
+            _log_progress("阶段 2/3 失败：配图未生成，已返回提示词和错误信息")
             return (
                 f"图文笔记已整理完成，但自动发布中止。\n"
                 f"标题：{note['title']}\n"
@@ -106,8 +117,10 @@ def make_note_agent(
             )
 
         try:
+            _log_progress("阶段 3/3：开始调用小红书 MCP 发布")
             result = note_service.publish_generated_note(artifact)
         except Exception as exc:
+            _log_progress(f"阶段 3/3 失败：发布异常：{exc}")
             return (
                 f"图文笔记和配图已生成，但发布失败：{exc}\n"
                 f"标题：{note['title']}\n"
@@ -116,6 +129,8 @@ def make_note_agent(
             )
 
         if result.get("success"):
+            total_elapsed = time.perf_counter() - start_time
+            _log_progress(f"阶段 3/3 完成：发布成功，总耗时={total_elapsed:.2f}s")
             return (
                 f"小红书图文笔记已自动发布成功。\n"
                 f"标题：{note['title']}\n"
@@ -125,6 +140,7 @@ def make_note_agent(
                 f"返回信息：{result.get('message', '发布成功')}"
             )
 
+        _log_progress(f"阶段 3/3 完成：发布返回失败，message={result.get('message', '未知错误')}")
         return (
             f"图文笔记和配图已生成，但发布失败。\n"
             f"标题：{note['title']}\n"

@@ -8,6 +8,10 @@ from typing import Any
 from xhs.schemas import XHSMCPPublishArgs, XHSNoteDraft
 
 
+def _log_progress(message: str) -> None:
+    print(f"[XHSPublishService] {message}", flush=True)
+
+
 def _clean_tags(tags: list[str]) -> list[str]:
     clean: list[str] = []
     seen: set[str] = set()
@@ -47,10 +51,14 @@ async def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
     from mcp.client.streamable_http import streamablehttp_client
 
     endpoint = os.getenv("XHS_MCP_ENDPOINT", "http://localhost:18060/mcp").strip()
+    _log_progress(f"连接 MCP 服务，endpoint={endpoint}")
     async with streamablehttp_client(endpoint) as (read, write, _):
         async with ClientSession(read, write) as session:
+            _log_progress("MCP session initialize")
             await session.initialize()
+            _log_progress(f"调用 MCP 工具：{tool_name}")
             result = await session.call_tool(tool_name, arguments=arguments)
+            _log_progress(f"MCP 工具调用完成：{tool_name}")
 
     if result.content:
         first = result.content[0]
@@ -67,6 +75,9 @@ async def publish_note_via_mcp(args: XHSMCPPublishArgs) -> dict[str, Any]:
     if not args.images:
         raise ValueError("发布到小红书前至少需要 1 张图片。")
 
+    _log_progress(
+        f"开始发布，title={args.title}，images={len(args.images)}，tags={len(args.tags)}，visibility={args.visibility}"
+    )
     tool_args: dict[str, Any] = {
         "title": args.title,
         "content": args.content,
@@ -80,6 +91,7 @@ async def publish_note_via_mcp(args: XHSMCPPublishArgs) -> dict[str, Any]:
     result = await _call_tool("publish_content", tool_args)
     raw_text = str(result.get("raw", ""))
     has_error = result.get("success") is False or "error" in raw_text.lower() or "失败" in raw_text
+    _log_progress(f"发布结果已返回，success={not has_error if raw_text else result.get('success', True)}")
     return {
         "success": not has_error if raw_text else result.get("success", True),
         "message": result.get("message") or raw_text or "发布成功",

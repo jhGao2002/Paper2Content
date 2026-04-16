@@ -9,6 +9,10 @@ from urllib import error, request
 from xhs.schemas import XHSNoteDraft
 
 
+def _log_progress(message: str) -> None:
+    print(f"[XHSImageService] {message}", flush=True)
+
+
 def _image_api_key() -> str:
     return (
         os.getenv("DASHSCOPE_API_KEY")
@@ -97,6 +101,7 @@ def build_cover_negative_prompt(note: XHSNoteDraft) -> str:
 
 
 def _post_json(url: str, payload: dict, api_key: str) -> dict:
+    _log_progress(f"请求图片接口，model={payload.get('model')}，endpoint={url}")
     req = request.Request(
         url=url,
         data=json.dumps(payload).encode("utf-8"),
@@ -108,6 +113,7 @@ def _post_json(url: str, payload: dict, api_key: str) -> dict:
     )
     try:
         with request.urlopen(req, timeout=120) as resp:
+            _log_progress(f"图片接口返回 HTTP {resp.status}")
             return json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
@@ -121,9 +127,11 @@ def _post_json(url: str, payload: dict, api_key: str) -> dict:
 
 
 def _download_file(url: str, target_path: Path) -> None:
+    _log_progress(f"开始下载图片：{url}")
     req = request.Request(url, headers={"User-Agent": "paper_assistant/1.0"})
     with request.urlopen(req, timeout=120) as resp:
         target_path.write_bytes(resp.read())
+    _log_progress(f"图片已保存到：{target_path}")
 
 
 def generate_cover_images(
@@ -138,9 +146,13 @@ def generate_cover_images(
     prompt = build_cover_prompt(note)
     output_root = output_dir or _image_output_dir()
     output_root.mkdir(parents=True, exist_ok=True)
+    _log_progress(
+        f"开始生成封面图，count={max(1, image_count)}，size={_image_size()}，prompt长度={len(prompt)}"
+    )
 
     saved_paths: list[str] = []
     for index in range(max(1, image_count)):
+        _log_progress(f"提交第 {index + 1} 张图片生成请求")
         payload = {
             "model": _image_model(),
             "input": {
@@ -179,4 +191,5 @@ def generate_cover_images(
         _download_file(image_url, target_path)
         saved_paths.append(str(target_path.resolve()))
 
+    _log_progress(f"封面图生成结束，共 {len(saved_paths)} 张")
     return saved_paths
