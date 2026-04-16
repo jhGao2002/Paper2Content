@@ -19,7 +19,9 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from state import SupervisorState
 from document.registry import format_doc_list
 
-AGENT_NAMES = ("ResearchAgent", "MemoryAgent", "GeneralAgent")
+AGENT_NAMES = ("ResearchAgent", "NoteAgent", "GeneralAgent")
+NOTE_ROUTE_KEYWORDS = ("笔记", "小红书", "图文", "封面配图")
+PUBLISH_ROUTE_KEYWORDS = ("发布图文笔记", "发布笔记", "发布到小红书", "小红书发布")
 
 
 def _last_agent_msg(state: SupervisorState):
@@ -35,6 +37,20 @@ def _last_user_msg(state: SupervisorState) -> str:
         (m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
         ""
     )
+
+
+def _should_route_to_note_agent(user_msg: str) -> bool:
+    if not user_msg or "笔记本" in user_msg:
+        return False
+    return any(keyword in user_msg for keyword in NOTE_ROUTE_KEYWORDS)
+
+
+def _should_publish_graphic_note(user_msg: str) -> bool:
+    if not user_msg:
+        return False
+    if any(keyword in user_msg for keyword in PUBLISH_ROUTE_KEYWORDS):
+        return True
+    return "发布" in user_msg and ("笔记" in user_msg or "小红书" in user_msg or "图文" in user_msg)
 
 
 def build_supervisor_node(fast_llm):
@@ -75,6 +91,16 @@ def build_supervisor_node(fast_llm):
 
         user_msg = _last_user_msg(state)
         doc_info = format_doc_list()
+        if _should_publish_graphic_note(user_msg) and "暂无文档" not in doc_info:
+            plan = [
+                "ResearchAgent: 总结当前已加载文档中适合整理为图文笔记的核心 insight 和结论",
+                "NoteAgent: 基于前一步 insight 整理图文笔记、生成配图并发布到小红书",
+            ]
+            print("[Supervisor] 路由决策：生成发布计划（ResearchAgent → NoteAgent）")
+            return {"next": "ResearchAgent", "plan": plan, "plan_step": 0, "step_results": []}
+        if _should_route_to_note_agent(user_msg):
+            print("[Supervisor] 路由决策：NoteAgent（命中笔记/小红书关键词）")
+            return {"next": "NoteAgent", "plan": [], "plan_step": 0, "step_results": []}
 
         prompt = (
             f"你是主控路由节点。根据用户问题决定处理方式。\n\n"
@@ -88,7 +114,7 @@ def build_supervisor_node(fast_llm):
             f"如果是简单的单步问题，只输出一个词：\n"
             f"  GeneralAgent：问候、闲聊、不涉及文档的问题\n"
             f"  ResearchAgent：查询单篇文档内容、学术概念\n"
-            f"  MemoryAgent：查询或保存笔记\n\n"
+            f"  NoteAgent：查询或保存笔记，整理图文笔记，发布到小红书\n\n"
             f"只输出一个词或一个 JSON，不得有其他内容：\n"
         )
 
@@ -111,7 +137,7 @@ def build_supervisor_node(fast_llm):
 
         # 简单路由
         next_agent = "GeneralAgent"
-        for agent in ["ResearchAgent", "MemoryAgent", "GeneralAgent"]:
+        for agent in ["ResearchAgent", "NoteAgent", "GeneralAgent"]:
             if agent in raw:
                 next_agent = agent
                 break

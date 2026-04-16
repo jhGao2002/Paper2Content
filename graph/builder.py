@@ -11,21 +11,31 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from state import SupervisorState
 from graph.supervisor import build_supervisor_node
+from agents.note_agent import make_note_agent
 from agents.research import make_research_agent
-from agents.memory_agent import make_memory_agent
 from agents.general import make_general_agent
 
 
 def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id: str,
-                stats: dict, loaded_docs: list, checkpointer, on_retrieval=None):
+                stats: dict, loaded_docs: list, checkpointer, on_retrieval=None,
+                note_service=None, note_history_provider=None):
 
     research_agent = make_research_agent(llm, fast_llm, pdf_store, loaded_docs, on_retrieval=on_retrieval)
-    memory_agent = make_memory_agent(llm, memory_store, user_id, session_id, stats)
+    note_agent = make_note_agent(
+        llm,
+        memory_store,
+        user_id,
+        session_id,
+        stats,
+        note_service=note_service,
+        note_history_provider=note_history_provider,
+    )
     general_agent = make_general_agent(llm, stats)
 
     def _invoke_agent(agent, state: SupervisorState, agent_name: str) -> dict:
         """通用 Agent 调用：处理计划模式下的任务注入。"""
         messages = list(state["messages"])
+        plan_context: list[SystemMessage] = []
 
         # 计划模式：把当前步骤的任务描述注入为 SystemMessage，让 Agent 明确目标
         plan = state.get("plan", [])
@@ -34,7 +44,17 @@ def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id
             task = plan[plan_step]
             # 提取任务描述（去掉 "AgentName: " 前缀）
             task_desc = task.split(":", 1)[-1].strip() if ":" in task else task
-            messages = [SystemMessage(content=f"【当前任务】：{task_desc}")] + messages
+            plan_context.append(SystemMessage(content=f"【当前任务】：{task_desc}"))
+
+        step_results = state.get("step_results", [])
+        if step_results:
+            prior = "\n\n".join(
+                f"步骤{i + 1}结果：{result}" for i, result in enumerate(step_results)
+            )
+            plan_context.append(SystemMessage(content=f"【前序结果】：\n{prior}"))
+
+        if plan_context:
+            messages = plan_context + messages
 
         result = agent.invoke({"messages": messages})
         answer = result["messages"][-1].content
@@ -45,9 +65,9 @@ def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id
         print("[Supervisor] → ResearchAgent")
         return _invoke_agent(research_agent, state, "ResearchAgent")
 
-    def memory_node(state: SupervisorState) -> dict:
-        print("[Supervisor] → MemoryAgent")
-        return _invoke_agent(memory_agent, state, "MemoryAgent")
+    def note_node(state: SupervisorState) -> dict:
+        print("[Supervisor] → NoteAgent")
+        return _invoke_agent(note_agent, state, "NoteAgent")
 
     def general_node(state: SupervisorState) -> dict:
         print("[Supervisor] → GeneralAgent")
@@ -88,7 +108,7 @@ def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id
     workflow = StateGraph(SupervisorState)
     workflow.add_node("supervisor", build_supervisor_node(fast_llm))
     workflow.add_node("ResearchAgent", research_node)
-    workflow.add_node("MemoryAgent", memory_node)
+    workflow.add_node("NoteAgent", note_node)
     workflow.add_node("GeneralAgent", general_node)
     workflow.add_node("synthesizer", synthesizer_node)
 
@@ -99,7 +119,7 @@ def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id
         lambda state: state["next"],
         {
             "ResearchAgent": "ResearchAgent",
-            "MemoryAgent":   "MemoryAgent",
+            "NoteAgent":     "NoteAgent",
             "GeneralAgent":  "GeneralAgent",
             "synthesizer":   "synthesizer",
             "FINISH":        END,
@@ -108,7 +128,7 @@ def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id
 
     # 所有 Agent 执行完都回到 Supervisor
     workflow.add_edge("ResearchAgent", "supervisor")
-    workflow.add_edge("MemoryAgent",   "supervisor")
+    workflow.add_edge("NoteAgent",     "supervisor")
     workflow.add_edge("GeneralAgent",  "supervisor")
     # Synthesizer 完成后结束
     workflow.add_edge("synthesizer", END)

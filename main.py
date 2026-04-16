@@ -53,6 +53,8 @@ class MultiAgentApp:
             loaded_docs=self.loaded_docs,
             checkpointer=self._db_conn,
             on_retrieval=self._record_retrieval,
+            note_service=self.xhs_note_service,
+            note_history_provider=self.get_chat_history,
         )
 
     def _record_retrieval(self, content: str) -> None:
