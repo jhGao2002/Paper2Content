@@ -17,7 +17,7 @@
   <img src="https://img.shields.io/badge/License-Not%20Specified-lightgrey" alt="License Not Specified" />
 </p>
 
-> Paper2Content 并不是一个停留在“Chat with PDF”的 Demo，而是一个把 **文献学习、知识沉淀、内容整理、封面生成、风格迁移与发布工作流** 串成完整闭环的 Agentic System。它面向的核心痛点，不只是“怎么回答论文问题”，而是“如何把长论文理解、跨文献对比、知识复盘和内容创作放进同一条工程化链路里”。
+> Paper2Content 并不是一个停留在“Chat with PDF”的 Demo，而是一个把 **文献学习、知识沉淀、内容整理、封面生成、风格迁移与发布工作流** 串成完整闭环的 Agentic System。项目支持长文本解析、历史记忆回溯、多模态图文生成及跨平台自动化分发，形成“文献学习-内容输出-知识复盘”的完整学习闭环。
 
 ---
 
