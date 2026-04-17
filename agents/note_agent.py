@@ -8,8 +8,10 @@ from memory.store import save_fact
 from session.manager import (
     clear_publish_workflow,
     get_publish_workflow,
+    get_session_style_image,
     set_publish_workflow,
 )
+from style.gallery import get_style_image_path
 
 
 PUBLISH_ROUTE_KEYWORDS = ("发布图文笔记", "发布笔记", "发布到小红书", "小红书发布")
@@ -60,7 +62,7 @@ def _is_cancel_message(text: str) -> bool:
 
 def _is_continue_message(text: str) -> bool:
     raw = str(text or "").strip()
-    keywords = ("满意", "进入下一步", "继续下一步", "继续吧", "没问题", "确认内容", "内容满意")
+    keywords = ("满意", "进入下一步", "继续下一步", "继续做封面", "开始做封面", "做封面")
     return any(keyword in raw for keyword in keywords)
 
 
@@ -69,6 +71,16 @@ def _extract_explicit_title(text: str) -> str:
     if not match:
         return ""
     return match.group(1).strip()
+
+
+def _is_yes_message(text: str) -> bool:
+    raw = str(text or "").strip()
+    return any(keyword in raw for keyword in ("要", "需要", "做", "进行", "是", "yes", "用风格迁移"))
+
+
+def _is_no_message(text: str) -> bool:
+    raw = str(text or "").strip()
+    return any(keyword in raw for keyword in ("不要", "不需要", "不用", "不做", "否", "no"))
 
 
 class NoteWorkflowAgent:
@@ -161,6 +173,9 @@ class NoteWorkflowAgent:
             "image_prompt": "",
             "visibility": "公开可见",
             "is_original": True,
+            "use_style_transfer": False,
+            "selected_style_image": "",
+            "selected_style_path": "",
         }
         set_publish_workflow(self.session_id, workflow)
         return self.note_service.render_candidate_list(candidates)
@@ -190,9 +205,8 @@ class NoteWorkflowAgent:
         return (
             "我已经根据你选中的素材整理出一版小红书正文草稿。\n\n"
             f"{note.body}\n\n"
-            "请先确认这版图文笔记内容是否满意、是否进入下一步。\n"
-            "如果满意，请回复“满意”或“进入下一步”；\n"
-            "如果你想调整正文，也可以直接告诉我修改意见。"
+            "如果你还想改正文，直接告诉我修改意见就行。\n"
+            "如果这版正文可以了，想继续做封面，就回复“继续做封面”或“进入下一步”。"
         )
 
     def invoke(self, payload: dict) -> dict:
@@ -269,21 +283,48 @@ class NoteWorkflowAgent:
                 return (
                     "我已经按你的意见更新了图文笔记草稿。\n\n"
                     f"{note.body}\n\n"
-                    "如果满意，请回复“满意”或“进入下一步”；"
-                    "如果还想改，就继续告诉我。"
+                    "如果还想改正文，继续告诉我修改意见就行；"
+                    "如果正文可以了，想继续做封面，就回复“继续做封面”或“进入下一步”。"
                 )
 
         if stage == "await_cover_prompt":
-            note.title = user_message.strip()[:20] or note.title
             advanced_prompt = self.note_service.build_cover_prompt_from_user_prompt(note, user_message)
+            selected_style_image = get_session_style_image(self.session_id)
+            selected_style_path = get_style_image_path(selected_style_image) or ""
             workflow.update(
                 {
-                    "stage": "await_confirmation",
+                    "stage": "await_style_transfer_decision",
                     "note_draft": note.to_dict(),
                     "user_cover_prompt": user_message.strip(),
                     "image_prompt": advanced_prompt,
+                    "selected_style_image": selected_style_image,
+                    "selected_style_path": selected_style_path,
                 }
             )
+            set_publish_workflow(self.session_id, workflow)
+            style_hint = (
+                "???????????????????????????? MCP ?????"
+                if selected_style_image == "__remote_default__" else
+                (f"????????????{selected_style_image}" if selected_style_image else "????????????????????????????? MCP ?????????")
+            )
+            return (
+                "封面图高级 prompt 已准备好。\n"
+                f"{style_hint}\n"
+                "接下来是否要进行封面的风格迁移？\n"
+                "你可以回复“需要风格迁移”或“不需要风格迁移”。"
+            )
+
+        if stage == "await_style_transfer_decision":
+            if _is_yes_message(user_message) and not _is_no_message(user_message):
+                workflow["use_style_transfer"] = True
+            elif _is_no_message(user_message):
+                workflow["use_style_transfer"] = False
+            else:
+                return "我还没判断出你的选择。请明确回复“需要风格迁移”或“不需要风格迁移”。"
+
+            workflow["stage"] = "await_confirmation"
+            workflow["selected_style_image"] = get_session_style_image(self.session_id)
+            workflow["selected_style_path"] = get_style_image_path(workflow["selected_style_image"]) or ""
             set_publish_workflow(self.session_id, workflow)
             return self.note_service.render_publish_confirmation(workflow)
 
@@ -338,6 +379,16 @@ class NoteWorkflowAgent:
                     workflow["user_cover_prompt"] = user_message.strip()
                 updated = True
 
+            if "风格迁移" in user_message:
+                if _is_no_message(user_message):
+                    workflow["use_style_transfer"] = False
+                    updated = True
+                elif _is_yes_message(user_message):
+                    workflow["use_style_transfer"] = True
+                    updated = True
+                workflow["selected_style_image"] = get_session_style_image(self.session_id)
+                workflow["selected_style_path"] = get_style_image_path(workflow["selected_style_image"]) or ""
+
             note.body = self.note_service._finalize_publish_body(note.body, article_title)
             workflow["note_draft"] = note.to_dict()
             set_publish_workflow(self.session_id, workflow)
@@ -345,8 +396,8 @@ class NoteWorkflowAgent:
             if updated:
                 return "我已经按你的意见更新发布草稿。\n\n" + self.note_service.render_publish_confirmation(workflow)
             return (
-                "我这边还没有收到“确认发布”的明确指令。\n"
-                "如果你想继续调整，可以直接说修改意见；如果没问题，请回复“确认发布”。"
+                "我这边还没有收到“确认发布”的明确信号。\n"
+                "如果你想继续调整，直接告诉我修改意见；如果没问题，再回复“确认发布”。"
             )
 
         clear_publish_workflow(self.session_id)

@@ -7,17 +7,87 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from config import get_embeddings, get_fast_llm, get_llm
 from document.loader import load_document
+from document.registry import get_all_documents, unregister_document
 from document.source_excerpt import collect_cover_source_materials
 from graph.builder import build_graph
 from memory.compression import compress_window
 from memory.store import build_memory_context, init_vector_stores
-from session.manager import create_session, get_db_path, update_session_title
+from session.manager import (
+    create_session,
+    delete_session,
+    get_db_path,
+    get_publish_workflow,
+    get_session_documents,
+    get_session_style_image,
+    remove_document_from_all_sessions,
+    remove_style_image_from_all_sessions,
+    set_session_documents,
+    set_session_style_image,
+    update_session_title,
+)
+from style.gallery import delete_style_image, get_style_image_path, list_style_images, save_style_image
 from xhs.note_service import XHSNoteService
+
+DEFAULT_REMOTE_STYLE_VALUE = "默认"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
     value = str(default) if os.getenv(name) is None else os.getenv(name, str(default))
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_text(name: str, default: str) -> str:
+    value = os.getenv(name, default)
+    return value.strip() or default
+
+
+def _ensure_local_no_proxy() -> None:
+    local_hosts = ["127.0.0.1", "localhost", "0.0.0.0"]
+    for env_name in ("NO_PROXY", "no_proxy"):
+        current = os.getenv(env_name, "").strip()
+        entries = [item.strip() for item in current.split(",") if item.strip()]
+        for host in local_hosts:
+            if host not in entries:
+                entries.append(host)
+        os.environ[env_name] = ",".join(entries)
+
+
+def _launch_demo(demo) -> None:
+    share = _env_flag("GRADIO_SHARE", False)
+    port = int(_env_text("GRADIO_SERVER_PORT", "7861"))
+    configured_host = _env_text("GRADIO_SERVER_NAME", "127.0.0.1")
+    fallback_host = "127.0.0.1"
+    _ensure_local_no_proxy()
+
+    launch_hosts = [configured_host]
+    if configured_host != fallback_host:
+        launch_hosts.append(fallback_host)
+
+    last_error: Exception | None = None
+    for index, host in enumerate(launch_hosts, start=1):
+        print(
+            f"[Startup] 准备启动 Gradio（第{index}次），host={host}，port={port}，share={share}",
+            flush=True,
+        )
+        print(
+            f"[Startup] NO_PROXY={os.getenv('NO_PROXY', '') or os.getenv('no_proxy', '')}",
+            flush=True,
+        )
+        try:
+            demo.launch(
+                server_name=host,
+                server_port=port,
+                share=share,
+                quiet=False,
+                show_error=True,
+            )
+            return
+        except Exception as exc:
+            last_error = exc
+            print(f"[Startup] Gradio 启动失败，host={host}，error={exc}", flush=True)
+
+    if last_error is not None:
+        raise last_error
 
 
 class MultiAgentApp:
@@ -36,7 +106,16 @@ class MultiAgentApp:
             "questions_asked": 0,
             "notes_added": 0,
         }
-        self.loaded_docs: list[str] = []
+        valid_names = {doc["filename"] for doc in get_all_documents()}
+        self.loaded_docs: list[str] = [
+            name for name in get_session_documents(self.session_id)
+            if name in valid_names
+        ]
+        set_session_documents(self.session_id, self.loaded_docs)
+        self.selected_style_image = get_session_style_image(self.session_id)
+        if self.selected_style_image and self.selected_style_image != DEFAULT_REMOTE_STYLE_VALUE and not get_style_image_path(self.selected_style_image):
+            self.selected_style_image = ""
+            set_session_style_image(self.session_id, "")
         self._first_message = True
         self.last_retrieved_docs = ""
         self.xhs_note_service = XHSNoteService(
@@ -59,6 +138,7 @@ class MultiAgentApp:
             on_retrieval=self._record_retrieval,
             note_service=self.xhs_note_service,
             note_history_provider=self.get_chat_history,
+            has_active_publish_workflow=self.has_active_publish_workflow,
         )
 
     def _record_retrieval(self, content: str) -> None:
@@ -137,7 +217,96 @@ class MultiAgentApp:
             doc_name = result["document"]
             if doc_name not in self.loaded_docs:
                 self.loaded_docs.append(doc_name)
+                set_session_documents(self.session_id, self.loaded_docs)
         return result
+
+    def list_available_documents(self) -> list[dict]:
+        return get_all_documents()
+
+    def set_session_documents(self, filenames: list[str]) -> list[str]:
+        valid_names = {doc["filename"] for doc in get_all_documents()}
+        self.loaded_docs[:] = [name for name in dict.fromkeys(filenames) if name in valid_names]
+        set_session_documents(self.session_id, self.loaded_docs)
+        self.stats["docs_loaded"] = len(self.loaded_docs)
+        return list(self.loaded_docs)
+
+    def delete_document(self, filename: str) -> dict:
+        if not filename:
+            return {"success": False, "message": "请先选择要删除的文档。"}
+
+        deleted_chunks = self.pdf_store.delete_documents(
+            filter={"must": [{"key": "source", "match": {"value": filename}}]}
+        )
+        removed_meta = unregister_document(filename)
+        remove_document_from_all_sessions(filename)
+        self.loaded_docs[:] = [name for name in self.loaded_docs if name != filename]
+        self.stats["docs_loaded"] = len(self.loaded_docs)
+
+        if not deleted_chunks and not removed_meta:
+            return {"success": False, "message": f"未找到文档：{filename}"}
+
+        return {
+            "success": True,
+            "message": f"已删除文档 {filename}，清理 {deleted_chunks} 个向量分块。",
+        }
+
+    def delete_current_session(self) -> dict:
+        deleted_memory = self.memory_store.delete_documents(
+            filter={
+                "must": [
+                    {"key": "user_id", "match": {"value": self.user_id}},
+                    {"key": "session_id", "match": {"value": self.session_id}},
+                ]
+            }
+        )
+        removed = delete_session(self.session_id)
+        if not removed:
+            return {"success": False, "message": f"未找到会话：{self.session_id}"}
+
+        return {
+            "success": True,
+            "message": f"已删除会话 {self.session_id}，清理 {deleted_memory} 条长期记忆。",
+        }
+
+    def has_active_publish_workflow(self) -> bool:
+        workflow = get_publish_workflow(self.session_id)
+        return bool(isinstance(workflow, dict) and workflow.get("active"))
+
+    def list_style_images(self) -> list[dict]:
+        return list_style_images()
+
+    def set_session_style_image(self, filename: str) -> str:
+        valid_names = {item["filename"] for item in list_style_images()}
+        selected = str(filename or "").strip()
+        if selected == DEFAULT_REMOTE_STYLE_VALUE:
+            pass
+        elif selected and selected not in valid_names:
+            selected = ""
+        self.selected_style_image = selected
+        set_session_style_image(self.session_id, selected)
+        return self.selected_style_image
+
+    def upload_style_image(self, image_path: str) -> dict:
+        result = save_style_image(image_path)
+        if result.get("success"):
+            self.set_session_style_image(str(result.get("filename", "")))
+        return result
+
+    def delete_style_image(self, filename: str) -> dict:
+        if not filename:
+            return {"success": False, "message": "请先选择要删除的风格图。"}
+        deleted = delete_style_image(filename)
+        if not deleted:
+            return {"success": False, "message": f"未找到风格图：{filename}"}
+        remove_style_image_from_all_sessions(filename)
+        if self.selected_style_image == filename:
+            self.selected_style_image = ""
+        return {"success": True, "message": f"已删除风格图：{filename}"}
+
+    def get_selected_style_image_path(self) -> str:
+        if self.selected_style_image == DEFAULT_REMOTE_STYLE_VALUE:
+            return ""
+        return get_style_image_path(self.selected_style_image) or ""
 
     def generate_xhs_note(
         self,
@@ -164,10 +333,7 @@ class MultiAgentApp:
 if __name__ == "__main__":
     from ui.gradio_app import create_gradio_ui
 
+    print("[Startup] 正在构建 Gradio UI...", flush=True)
     demo = create_gradio_ui(app_factory=MultiAgentApp)
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7861,
-        share=_env_flag("GRADIO_SHARE", False),
-        quiet=False,
-    )
+    print("[Startup] Gradio UI 构建完成。", flush=True)
+    _launch_demo(demo)

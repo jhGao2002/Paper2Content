@@ -7,6 +7,7 @@ from pathlib import Path
 
 from xhs.image_service import build_cover_negative_prompt, build_cover_prompt, generate_cover_images
 from xhs.publish_service import build_mcp_publish_args_from_payload, publish_note_via_mcp_sync
+from xhs.style_transfer_service import style_transfer_sync
 from xhs.schemas import XHSNoteArtifact, XHSNoteDraft, XHSPreparedUploadPayload
 
 
@@ -50,11 +51,113 @@ def _truncate_text(text: str, limit: int) -> str:
     return clean[: max(0, limit - 3)].rstrip() + "..."
 
 
-def _title_from_user_prompt(text: str, limit: int = 20) -> str:
+def _fallback_short_title(text: str, limit: int = 15) -> str:
     clean = re.sub(r"\s+", " ", str(text or "").strip())
     if not clean:
         return ""
+
+    clean = re.sub(r"[“”\"'`]+", "", clean)
+    clean = re.sub(r"[，。！？；：,.!?;:]+$", "", clean)
+    clean = re.sub(
+        r"^(例如|比如|像是|关于|对于|如果|当|在|做|讲|说|聊聊|我想问|我想写|我想发|帮我写|帮我总结)",
+        "",
+        clean,
+    ).strip()
+
+    preferred_parts = [item.strip(" ，。！？；：,.!?;:") for item in _split_sentences(clean) if item.strip()]
+    if preferred_parts:
+        clean = preferred_parts[0]
+
+    for splitter in ("可以", "可能", "的时候", "时", "如何", "怎么", "为什么"):
+        if splitter in clean:
+            prefix = clean.split(splitter, 1)[0].strip(" ，。！？；：,.!?;:")
+            if len(prefix) >= 4:
+                clean = prefix
+                break
+
     return _truncate_text(clean, limit)
+
+
+def _looks_like_workflow_message(text: str) -> bool:
+    raw = re.sub(r"\s+", " ", str(text or "").strip()).lower()
+    if not raw:
+        return True
+    if re.fullmatch(r"[\d,\s，、]+", raw):
+        return True
+
+    workflow_keywords = (
+        "发布到小红书",
+        "发布笔记",
+        "发布图文笔记",
+        "小红书发布",
+        "确认发布",
+        "开始发布",
+        "进入下一步",
+        "继续下一步",
+        "继续做封面",
+        "开始做封面",
+        "满意",
+        "没问题",
+        "确认内容",
+        "内容满意",
+        "需要风格迁移",
+        "不需要风格迁移",
+        "确认发布",
+        "取消发布",
+    )
+    return any(keyword in raw for keyword in workflow_keywords)
+
+
+def _looks_like_publishable_question(text: str) -> bool:
+    raw = re.sub(r"\s+", " ", str(text or "").strip())
+    if len(raw) < 4:
+        return False
+    if _looks_like_workflow_message(raw):
+        return False
+
+    question_keywords = (
+        "?",
+        "？",
+        "什么",
+        "哪些",
+        "哪个",
+        "怎么",
+        "如何",
+        "为什么",
+        "为何",
+        "是否",
+        "能否",
+        "有没有",
+        "吗",
+        "么",
+        "呢",
+        "区别",
+        "差异",
+        "对比",
+        "创新点",
+        "优缺点",
+        "原理",
+        "流程",
+        "作用",
+        "含义",
+    )
+    if any(keyword in raw for keyword in question_keywords):
+        return True
+
+    ask_prefixes = (
+        "请总结",
+        "请解释",
+        "请分析",
+        "请对比",
+        "请说明",
+        "帮我总结",
+        "帮我解释",
+        "帮我分析",
+        "帮我对比",
+        "详细说说",
+        "展开讲讲",
+    )
+    return any(raw.startswith(prefix) for prefix in ask_prefixes)
 
 
 def _extract_hash_tags(text: str) -> list[str]:
@@ -351,6 +454,9 @@ class XHSNoteService:
                 continue
             if role != "assistant" or not pending_user:
                 continue
+            if not _looks_like_publishable_question(pending_user):
+                pending_user = ""
+                continue
             if any(keyword in pending_user for keyword in ("发布到小红书", "发布笔记", "发布图文笔记", "小红书发布")):
                 pending_user = ""
                 continue
@@ -457,7 +563,11 @@ class XHSNoteService:
         note: XHSNoteDraft,
         user_prompt: str,
     ) -> str:
-        note.title = _title_from_user_prompt(user_prompt, limit=20) or note.title
+        note.title = self.summarize_title_from_prompt(
+            user_prompt,
+            fallback_title=note.title,
+            limit=15,
+        ) or note.title
         source_materials = self._get_cover_source_materials()
         cover_brief = {
             "core_insight": str(user_prompt or "").strip() or note.cover_hook or note.solved_problem,
@@ -469,6 +579,42 @@ class XHSNoteService:
             source_materials=source_materials,
             paper_title_short=_build_paper_title_short(_extract_paper_title(source_materials)),
         )
+
+    def summarize_title_from_prompt(
+        self,
+        user_prompt: str,
+        fallback_title: str = "",
+        limit: int = 15,
+    ) -> str:
+        prompt_text = str(user_prompt or "").strip()
+        if not prompt_text:
+            return _fallback_short_title(fallback_title, limit=limit)
+
+        prompt = (
+            "你是小红书图文标题编辑。请根据用户提供的写作意图，"
+            f"总结成一个适合图文笔记发布的中文标题，要求不超过{limit}个字。\n"
+            "要求：\n"
+            "1. 必须是标题，不要复述整句原话。\n"
+            "2. 语言精炼，有传播感，可以偏爆款表达。\n"
+            "3. 只输出标题本身，不要解释，不要引号，不要序号。\n\n"
+            f"用户prompt：{prompt_text}"
+        )
+        try:
+            raw = str(self.llm.invoke(prompt).content).strip()
+        except Exception as exc:
+            _log_progress(f"标题总结失败，改用规则兜底：{exc}")
+            raw = ""
+
+        candidate = re.sub(r"\s+", "", raw)
+        candidate = re.sub(r"^[#\-\d.、\s]+", "", candidate)
+        candidate = re.sub(r"[“”\"'`]+", "", candidate)
+        candidate = re.sub(r"[，。！？；：,.!?;:]+$", "", candidate)
+
+        if not candidate:
+            candidate = _fallback_short_title(prompt_text, limit=limit)
+        if not candidate:
+            candidate = _fallback_short_title(fallback_title, limit=limit)
+        return _truncate_text(candidate, limit)
 
     def revise_publish_note(
         self,
@@ -538,6 +684,12 @@ class XHSNoteService:
         image_prompt = str(workflow.get("image_prompt", "")).strip()
         visibility = str(workflow.get("visibility", "公开可见")).strip() or "公开可见"
         article_title = str(workflow.get("article_title", "")).strip()
+        use_style_transfer = bool(workflow.get("use_style_transfer"))
+        selected_style_image = str(workflow.get("selected_style_image", "")).strip()
+        if use_style_transfer:
+            style_summary = "使用远程 MCP 默认风格" if selected_style_image == "__remote_default__" else (selected_style_image or "使用 MCP 服务默认风格图")
+        else:
+            style_summary = "不做风格迁移"
 
         lines = ["发布草稿已经准备好了，请你最后确认：", "", "已选素材："]
         for index, item in enumerate(selected_items, start=1):
@@ -552,6 +704,7 @@ class XHSNoteService:
                 f"标签：{'、'.join(note.hashtags) if note.hashtags else '未设置'}",
                 f"可见性：{visibility}",
                 "图片：1 张封面图（确认后自动生成）",
+                f"风格迁移：{style_summary}",
                 "",
                 "正文预览：",
                 note.body,
@@ -606,6 +759,23 @@ class XHSNoteService:
             )
         except Exception as exc:
             return {"success": False, "message": f"封面图生成失败：{exc}"}
+
+        use_style_transfer = bool(workflow.get("use_style_transfer"))
+        if use_style_transfer and image_paths:
+            selected_style_path = str(workflow.get("selected_style_path", "")).strip()
+            transfer_result = style_transfer_sync(
+                content_path=image_paths[0],
+                style_path=selected_style_path,
+            )
+            if not transfer_result.get("success"):
+                return {
+                    "success": False,
+                    "message": f"风格迁移失败：{transfer_result.get('message', '未知错误')}",
+                }
+            output_path = str(transfer_result.get("output_path", "")).strip()
+            if output_path:
+                image_paths = [output_path]
+            workflow["style_transfer_result"] = transfer_result
 
         prepared_payload = self.build_prepared_payload(
             note=note,
@@ -781,41 +951,40 @@ class XHSNoteService:
         source_excerpt = ""
         if source_materials:
             first = source_materials[0]
-            source_excerpt = f"论文标题：{first.get('title', '')}\n原文片段：{first.get('excerpt', '')}"
+            source_excerpt = f"参考资料标题：{first.get('title', '')}\n参考资料摘录：{first.get('excerpt', '')}"
 
         prompt = (
             f"{VISUAL_DIRECTOR_PROMPT}\n\n"
-            "补充执行要求：\n"
-            "1. 这是一张 512x512 的小红书封面图，画面要有强视觉冲击力。\n"
-            "2. 封面后续可能还会做风格迁移，所以主体轮廓、场景层次、道具语义必须清楚稳定。\n"
-            "3. 允许加入 1-2 句大字报风格中文文案，并明确文案放在哪里，但文字不能遮挡主体。\n"
-            "4. 不要输出图表、坐标轴、分布曲线、数学公式。必须用现实世界的隐喻场景表达论文 insight。\n"
-            "5. 输出里的 detailed_prompt 必须是一段可以直接喂给图像生成模型的中文指令。\n"
-            "请只输出 JSON，不要解释：\n"
+            "请基于下面的信息，为封面图生成一个高保真 detailed_prompt。\n"
+            "要求：\n"
+            "1. 图片必须忠实表达 core_insight，不能偷换成泛泛的 AI、论文、科技感插图。\n"
+            "2. 如果 core_insight 里有先后关系、方法选择、因果关系、对比关系，画面必须把这个关系表现出来。\n"
+            "3. 允许增强视觉冲击力，但不能偏离原始含义，不能自作主张改主题。\n"
+            "4. detailed_prompt 必须显式围绕 core_insight 来写出主体、冲突、解法、结果和版式。\n"
+            "5. 如果 supporting_elements 有内容，优先把它们融入画面。\n"
+            "6. 输出 JSON，不要额外解释。\n"
             "{\n"
-            '  "negative_metaphor_scene": "反面情况的现实隐喻场景",\n'
-            '  "positive_metaphor_scene": "正面情况的现实隐喻场景",\n'
-            '  "headline_copy": ["1-2句爆款中文文案"],\n'
-            '  "text_overlay_layout": "文案叠加位置与排版建议",\n'
-            '  "detailed_prompt": "一段详细中文 prompt，150-260字，直接给文生图模型",\n'
-            '  "supporting_elements": ["最多6个辅助视觉元素"],\n'
-            '  "composition": "更具体的构图要求",\n'
-            '  "pain_point_visual": "更具体的问题状态视觉描述",\n'
-            '  "solution_visual": "更具体的解决状态视觉描述",\n'
-            '  "style_keywords": ["最多5个风格关键词"],\n'
-            '  "avoid_elements": ["最多6个避免元素"]\n'
+            '  "headline_copy": ["1-2条封面短文案"],\n'
+            '  "text_overlay_layout": "封面文字布局建议",\n'
+            '  "detailed_prompt": "最终高质量出图 prompt",\n'
+            '  "supporting_elements": ["补充视觉元素"],\n'
+            '  "composition": "构图描述",\n'
+            '  "pain_point_visual": "问题画面",\n'
+            '  "solution_visual": "解法/结果画面",\n'
+            '  "style_keywords": ["风格关键词"],\n'
+            '  "avoid_elements": ["要避免的元素"]\n'
             "}\n\n"
-            f"论文简称：{paper_title_short or '未提供'}\n"
-            f"核心洞察：{core_insight}\n"
-            f"当前主体：{note.image_plan.main_subject}\n"
-            f"当前场景：{note.image_plan.scene}\n"
-            f"当前问题状态：{note.image_plan.pain_point_visual}\n"
-            f"当前解决状态：{note.image_plan.solution_visual}\n"
-            f"当前辅助元素：{', '.join(supporting_elements or note.image_plan.props)}\n"
+            f"论文简称：{paper_title_short or '本次主题'}\n"
+            f"core_insight：{core_insight}\n"
+            f"主视觉主体：{note.image_plan.main_subject}\n"
+            f"场景：{note.image_plan.scene}\n"
+            f"问题画面：{note.image_plan.pain_point_visual}\n"
+            f"解决画面：{note.image_plan.solution_visual}\n"
+            f"支持元素：{', '.join(supporting_elements or note.image_plan.props)}\n"
             f"{source_excerpt}"
         )
         try:
-            _log_progress("调用 LLM 生成更详细的封面视觉 prompt")
+            _log_progress("调用 LLM 生成高保真封面 prompt")
             raw = self.llm.invoke(prompt).content
             data = _extract_json_payload(str(raw))
             detailed_prompt = str(data.get("detailed_prompt", "")).strip()
@@ -840,22 +1009,60 @@ class XHSNoteService:
             if merged_supporting:
                 note.image_plan.props = list(dict.fromkeys(merged_supporting))[:6]
             if detailed_prompt:
-                overlay_text = "；".join(headline_copy[:2])
+                overlay_text = "，".join(headline_copy[:2])
                 overlay_suffix = ""
                 if overlay_text or text_overlay_layout:
                     overlay_suffix = (
-                        f" 文案建议：{overlay_text or '无'}。"
-                        f" 文字叠加位置：{text_overlay_layout or '画面边缘留白区域，大字报风格，避免遮挡主体'}。"
+                        f" 封面文案：{overlay_text or '无'}。"
+                        f" 文案布局：{text_overlay_layout or '标题居中偏上，避免遮挡主视觉。'}。"
                     )
-                return f"{detailed_prompt}{overlay_suffix}".strip()
+                return self._anchor_prompt_to_core_insight(
+                    f"{detailed_prompt}{overlay_suffix}".strip(),
+                    core_insight=core_insight,
+                    supporting_elements=supporting_elements or list(note.image_plan.props),
+                    paper_title_short=paper_title_short,
+                )
         except Exception as exc:
-            _log_progress(f"详细封面 prompt 生成失败，回退到规则模板：{exc}")
+            _log_progress(f"高保真封面 prompt 生成失败，回退基础模板：{exc}")
 
-        return build_cover_prompt(
-            note,
-            cover_core_insight=core_insight,
-            supporting_elements=supporting_elements,
+        return self._anchor_prompt_to_core_insight(
+            build_cover_prompt(
+                note,
+                cover_core_insight=core_insight,
+                supporting_elements=supporting_elements,
+            ),
+            core_insight=core_insight,
+            supporting_elements=supporting_elements or list(note.image_plan.props),
+            paper_title_short=paper_title_short,
         )
+
+    def _anchor_prompt_to_core_insight(
+        self,
+        prompt: str,
+        core_insight: str,
+        supporting_elements: list[str] | None = None,
+        paper_title_short: str = "",
+    ) -> str:
+        clean_prompt = str(prompt or "").strip()
+        insight = str(core_insight or "").strip()
+        supports = [str(item).strip() for item in (supporting_elements or []) if str(item).strip()]
+        if not insight:
+            return clean_prompt
+
+        anchor_lines = [
+            "必须忠实表现以下核心信息，不能偏题。",
+            f"核心信息：{insight}。",
+            "图片必须直接表达这层含义，而不是只画泛化的科技或 AI 元素。",
+        ]
+        if supports:
+            anchor_lines.append(f"可保留这些辅助元素：{', '.join(supports[:6])}。")
+        if paper_title_short:
+            anchor_lines.append(f"主题简称：{paper_title_short}。")
+
+        anchor_text = " ".join(anchor_lines).strip()
+        if not clean_prompt:
+            return anchor_text
+        return f"{clean_prompt} {anchor_text}".strip()
 
     def generate_note_artifact(
         self,
