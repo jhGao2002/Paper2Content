@@ -36,6 +36,17 @@ def register_document(filename: str, title: str, summary: str, chunk_count: int)
     print(f"[Registry] 文档已注册: {title}")
 
 
+def unregister_document(filename: str) -> bool:
+    """删除文档元数据，返回是否真的删除了记录。"""
+    data = _load()
+    removed = data.pop(filename, None)
+    if removed is None:
+        return False
+    _save(data)
+    print(f"[Registry] 文档已删除: {filename}")
+    return True
+
+
 def get_all_documents() -> list:
     """返回所有已注册文档的元数据列表，按入库时间倒序。"""
     data = _load()
@@ -50,10 +61,15 @@ def is_registered(filename: str) -> bool:
     return filename in _load()
 
 
-def format_doc_list() -> str:
+def format_doc_list(allowed_filenames: list[str] | None = None) -> str:
     """格式化为 list_documents 工具的返回字符串。"""
     docs = get_all_documents()
+    if allowed_filenames is not None:
+        allowed = set(allowed_filenames)
+        docs = [doc for doc in docs if doc["filename"] in allowed]
     if not docs:
+        if allowed_filenames is not None:
+            return "当前会话未选择任何文档，请先在会话面板勾选要加载的文档。"
         return "知识库中暂无文档，请先上传 PDF 文件。"
     lines = [f"知识库中共有 {len(docs)} 篇文档：\n"]
     for i, d in enumerate(docs, 1):

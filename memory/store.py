@@ -127,6 +127,20 @@ class FaissVectorStore:
                 break
         return results
 
+    def delete_documents(self, filter: dict | None = None) -> int:
+        if not self._docs:
+            return 0
+
+        remaining_docs = [doc for doc in self._docs if not _match_filter(doc.metadata, filter)]
+        deleted_count = len(self._docs) - len(remaining_docs)
+        if deleted_count == 0:
+            return 0
+
+        self._docs = [deepcopy(doc) for doc in remaining_docs]
+        self._rebuild_index()
+        self._save()
+        return deleted_count
+
     def _create_index(self, dim: int):
         cpu_index = faiss.IndexFlatIP(dim)
         if not self.use_gpu:
@@ -161,6 +175,25 @@ class FaissVectorStore:
         ]
         with open(self.docs_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    def _rebuild_index(self):
+        self._index = None
+        self._dim = None
+        self._gpu_resources = None
+        if not self._docs:
+            return
+
+        for start in range(0, len(self._docs), EMBED_BATCH_SIZE):
+            batch_docs = self._docs[start:start + EMBED_BATCH_SIZE]
+            texts = [doc.page_content for doc in batch_docs]
+            embeddings = self.embedding.embed_documents(texts)
+            vectors = _normalize(np.array(embeddings, dtype="float32"))
+
+            if self._index is None:
+                self._dim = vectors.shape[1]
+                self._index = self._create_index(self._dim)
+
+            self._index.add(vectors)
 
     def _load(self):
         if self.docs_path.exists():

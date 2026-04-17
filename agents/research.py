@@ -20,7 +20,7 @@ def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list, on_retrieva
     @tool
     def list_documents() -> str:
         """列出当前可检索的文档。"""
-        result = format_doc_list()
+        result = format_doc_list(loaded_docs)
         if "暂无文档" in result:
             try:
                 sources = pdf_store.list_sources()
@@ -41,6 +41,10 @@ def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list, on_retrieva
     def search_pdf(query: str, source: str = "") -> str:
         """在 PDF 知识库中检索相关内容，可选按 source 限定文档。"""
         print(f"  [ResearchAgent][TOOL] search_pdf 开始，query: {query}, source: {source or '全部'}")
+        if not loaded_docs:
+            return "当前会话未选择任何文档，请先在会话面板勾选要加载的文档。"
+        if source and source not in loaded_docs:
+            return f"文档 {source} 未加入当前会话，请先在会话面板勾选该文档。"
         mqe_prompt = (
             "请围绕下面的问题补充 3 个不同表达方式的检索子查询，"
             "每行一个，避免重复。\n"
@@ -57,7 +61,16 @@ def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list, on_retrieva
                     k=3,
                     filter={"must": [{"key": "source", "match": {"value": source}}]},
                 )
-            return pdf_store.similarity_search(single_query, k=3)
+            docs = []
+            for selected_source in loaded_docs:
+                docs.extend(
+                    pdf_store.similarity_search(
+                        single_query,
+                        k=3,
+                        filter={"must": [{"key": "source", "match": {"value": selected_source}}]},
+                    )
+                )
+            return docs
 
         with ThreadPoolExecutor() as executor:
             batches = list(executor.map(search_one, search_queries))

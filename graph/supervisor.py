@@ -53,7 +53,7 @@ def _should_publish_graphic_note(user_msg: str) -> bool:
     return "发布" in user_msg and ("笔记" in user_msg or "小红书" in user_msg or "图文" in user_msg)
 
 
-def build_supervisor_node(fast_llm):
+def build_supervisor_node(fast_llm, has_active_publish_workflow=None):
 
     def supervisor_node(state: SupervisorState) -> dict:
         plan = state.get("plan", [])
@@ -90,14 +90,13 @@ def build_supervisor_node(fast_llm):
             return {"next": "FINISH"}
 
         user_msg = _last_user_msg(state)
+        if callable(has_active_publish_workflow) and has_active_publish_workflow():
+            print("[Supervisor] 路由决策：NoteAgent（存在进行中的发布草稿）")
+            return {"next": "NoteAgent", "plan": [], "plan_step": 0, "step_results": []}
         doc_info = format_doc_list()
-        if _should_publish_graphic_note(user_msg) and "暂无文档" not in doc_info:
-            plan = [
-                "ResearchAgent: 总结当前已加载文档中适合整理为图文笔记的核心 insight 和结论",
-                "NoteAgent: 基于前一步 insight 整理图文笔记、生成封面图并准备小红书上传内容",
-            ]
-            print("[Supervisor] 路由决策：生成发布计划（ResearchAgent → NoteAgent）")
-            return {"next": "ResearchAgent", "plan": plan, "plan_step": 0, "step_results": []}
+        if _should_publish_graphic_note(user_msg):
+            print("[Supervisor] 路由决策：NoteAgent（进入人机协作发布流程）")
+            return {"next": "NoteAgent", "plan": [], "plan_step": 0, "step_results": []}
         if _should_route_to_note_agent(user_msg):
             print("[Supervisor] 路由决策：NoteAgent（命中笔记/小红书关键词）")
             return {"next": "NoteAgent", "plan": [], "plan_step": 0, "step_results": []}

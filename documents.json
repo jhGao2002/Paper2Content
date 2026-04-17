@@ -1,9 +1,9 @@
 {
-  "Zhou 等 - 2025 - Attention Distillation A Unified Approach to Visu.pdf": {
-    "filename": "Zhou 等 - 2025 - Attention Distillation A Unified Approach to Visu.pdf",
-    "title": "Attention Distillation: A Unified Approach to Visual Characteristics Transfer",
-    "summary": "",
-    "date_added": "2026-04-14 17:10",
-    "chunk_count": 262
+  "Nie 等 - 2026 - COCODIFF CORRESPONDENCE-CONSISTENT DIFFU- SION MODEL FOR FINE-GRAINED STYLE TRANSFER.pdf": {
+    "filename": "Nie 等 - 2026 - COCODIFF CORRESPONDENCE-CONSISTENT DIFFU- SION MODEL FOR FINE-GRAINED STYLE TRANSFER.pdf",
+    "title": "COCODIFF: CORRESPONDENCE-CONSISTENT DIFFUSION MODEL FOR FINE-GRAINED STYLE TRANSFER",
+    "summary": "This paper introduces CoCoDiff, a novel training-free and low-cost style transfer framework for achieving fine-grained, semantically consistent stylization. CoCoDiff utilizes pretrained latent diffusion models and includes a pixel-wise semantic correspondence module and a cycle-consistency module to enforce structural and perceptual alignment, resulting in high-quality and semantically consistent style transfer.",
+    "date_added": "2026-04-17 17:27",
+    "chunk_count": 259
   }
 }

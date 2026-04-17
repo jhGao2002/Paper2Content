@@ -18,7 +18,8 @@ from agents.general import make_general_agent
 
 def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id: str,
                 stats: dict, loaded_docs: list, checkpointer, on_retrieval=None,
-                note_service=None, note_history_provider=None):
+                note_service=None, note_history_provider=None,
+                has_active_publish_workflow=None):
 
     research_agent = make_research_agent(llm, fast_llm, pdf_store, loaded_docs, on_retrieval=on_retrieval)
     note_agent = make_note_agent(
@@ -106,7 +107,10 @@ def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id
 
     # ── 图组装 ────────────────────────────────────────────────
     workflow = StateGraph(SupervisorState)
-    workflow.add_node("supervisor", build_supervisor_node(fast_llm))
+    workflow.add_node("supervisor", build_supervisor_node(
+        fast_llm,
+        has_active_publish_workflow=has_active_publish_workflow,
+    ))
     workflow.add_node("ResearchAgent", research_node)
     workflow.add_node("NoteAgent", note_node)
     workflow.add_node("GeneralAgent", general_node)

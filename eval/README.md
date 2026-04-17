@@ -255,3 +255,14 @@ full_20260416_103000/
 - 结果记录使用 Markdown 表格
 
 ## 评测结果记录
+
+### 2026-04-16 17:58
+- 模式：`full`
+- 评测样本数：`50`
+- 结果目录：`G:\AICoding\paper_assitant\result\eval_runs\full_20260416_142153`
+
+| 变体 | Precision | Recall | Retrieval F1 | Correctness | Faithfulness | 回答生成 Tokens | Ragas 评测 Tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 01_fixed_chunk_embedding3 | 0.9600 | 0.8633 | 0.8760 | 0.7251 | 0.9293 | 148477 | 460809 |
+| 02_parent_child_lexical | 0.3800 | 0.3933 | 0.2347 | 0.4006 | 0.8492 | 214990 | 594889 |
+| 03_parent_child_embedding3 | 0.9400 | 0.9250 | 0.8947 | 0.7537 | 0.9519 | 167526 | 572294 |
