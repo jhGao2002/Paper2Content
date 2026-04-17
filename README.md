@@ -45,48 +45,48 @@ Paper2Content 解决的是研究者、AI 工程师和技术内容创作者在真
 
 ## 系统架构 (Architecture)
 
-Paper2Content 当前的核心数据流转如下:
+Paper2Content 的架构不是把所有能力堆在同一条链路里，而是把“论文问答主链”和“内容生产旁路”拆开设计，在保证检索问答稳定性的前提下，再把图文生成与发布能力挂接到现有系统上。
 
-1. **文献解析与入库**: 上传 PDF 后，系统使用 `PyMuPDF4LLM` 解析全文，并按父子块策略切分；子块向量写入 `pdf_knowledge`，文档元数据登记到 `documents.json`。
-2. **检索增强与多 Agent 推理**: 用户问题进入 `Supervisor`；简单问题直接路由到专家 Agent，复杂问题进入 Plan-and-Act；`ResearchAgent` 负责扩展查询、并行召回、父块回填和 rerank。
-3. **会话记忆与状态持久化**: 聊天记录通过 `langgraph-checkpoint-sqlite` 持久化到 `sessions.db`，会话元数据保存在 `sessions.json`，长期语义记忆保存在 `user_semantic_memory`。
-4. **内容生产与发布**: 当用户进入图文流程后，系统会从问答和笔记中提炼候选素材，生成图文草稿、封面 prompt、图片资源，并可选接入风格迁移 MCP 和小红书发布 MCP。
+### 1. 架构目标
 
-```mermaid
-flowchart TD
-    subgraph A[Paper Ingestion]
-        A1[PDF Upload] --> A2[PyMuPDF4LLM Parse to Markdown]
-        A2 --> A3[Parent Chunks 1500/200]
-        A3 --> A4[Child Chunks 400/50]
-        A4 --> A5[FAISS: pdf_knowledge]
-        A2 --> A6[fast LLM Extracts Title and Summary]
-        A6 --> A7[documents.json Registry]
-    end
+- 保持原有论文问答、多 Agent 路由、记忆检索与 `eval` 评测链路稳定，不因为内容生产能力引入主流程回归。
+- 将论文理解、会话沉淀、图文生成、封面出图与发布编排成一条独立旁路，形成可复用的内容生产工作流。
+- 让系统既能回答“论文讲了什么”，也能继续完成“如何整理成可发布内容”的后续动作。
 
-    subgraph B[Retrieval and Reasoning]
-        B1[User Query] --> B2[Supervisor]
-        B2 -->|simple| B3[ResearchAgent / NoteAgent / GeneralAgent]
-        B2 -->|complex| B4[Plan-and-Act]
-        B3 --> B5[Query Expansion]
-        B4 --> B5
-        B5 --> B6[Parallel Child Retrieval]
-        B6 --> B7[Parent Text Reconstruction]
-        B7 --> B8[fast LLM Rerank]
-        B8 --> B9[Synthesizer or Final Answer]
-    end
+### 2. 模块划分
 
-    subgraph C[Learning Loop and Content Output]
-        B9 --> C1[Window Compression and Semantic Memory]
-        B9 --> C2[Candidate Notes from QA and Memory]
-        C2 --> C3[XHSNoteService]
-        C3 --> C4[Body Draft and Cover Prompt]
-        C4 --> C5[DashScope Image Generation]
-        C4 --> C6[Optional Style Transfer MCP]
-        C5 --> C7[Prepared Upload Payload]
-        C6 --> C7
-        C7 --> C8[Optional Xiaohongshu MCP Publish]
-    end
-```
+- **文献入库层**: 负责 PDF 上传、`PyMuPDF4LLM` 解析、父子块切分、向量写入 `pdf_knowledge`，并将标题、摘要、分块等元数据登记到 `documents.json`。
+- **检索与编排层**: 由 `Supervisor` 负责任务判断与路由，简单问题直达专家 Agent，复杂问题进入 Plan-and-Act；其中 `ResearchAgent` 负责 query expansion、并行召回、父块回填与 rerank。
+- **记忆与状态层**: 聊天状态通过 `langgraph-checkpoint-sqlite` 持久化到 `sessions.db`，会话索引保存在 `sessions.json`，长期语义记忆写入 `user_semantic_memory`，支撑跨轮复盘与历史回溯。
+- **内容生产层**: `NoteAgent` 与 `XHSNoteService` 将当前会话中的 QA、笔记和记忆整理成结构化图文草稿，并生成标题、摘要、正文、标签、封面视觉规划等中间结果。
+- **图像与发布层**: `xhs/image_service.py` 负责封面 prompt 生成与图片调用，`xhs/publish_service.py` 负责组装 MCP 发布参数，并可按需接入风格迁移 MCP 和小红书发布 MCP。
+
+### 3. 主链与旁路数据流
+
+**原有问答主链**
+
+`用户提问 -> Supervisor -> Research / Memory / General Agent -> 回答`
+
+这条链路负责论文检索、复杂问答与多 Agent 协同，是系统的核心学习入口，当前设计保持不变。
+
+**新增内容生产旁路**
+
+`session chat history -> XHSNoteService -> XHSNoteDraft -> Image Prompt -> DashScope Image Generation -> MCP Args -> publish_content`
+
+这条链路只消费已经存在的会话消息，不参与主图路由，不影响问答响应，也不会进入 `eval/` 评测管线。
+
+### 4. 统一 Artifact 设计
+
+为避免正文生成、封面生成、风格迁移和发布阶段各自重复总结，系统将内容生产结果统一收敛为一个 artifact，便于预览、落盘、重试和再编辑：
+
+- `note`: 标题、摘要、正文、CTA、hashtags、QA 提炼结果。
+- `image_prompt`: 最终传给文生图模型的 prompt。
+- `image_negative_prompt`: 当前主要用于记录视觉约束，便于后续接入支持 negative prompt 的模型。
+- `image_paths`: 已生成图片的本地路径。
+- `image_error`: 生图失败时的错误信息。
+- `mcp_args`: 与小红书 MCP 工具对齐的发布参数。
+
+这种设计让“会话转笔记”“封面图生成”“风格迁移”“发布重试”都能围绕同一份中间结果工作，减少跨步骤的信息漂移。
 
 ---
 
