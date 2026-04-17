@@ -11,6 +11,7 @@ faiss-cpu; platform_system == "Windows"
 faiss-gpu; platform_system != "Windows"
 pymupdf
 pymupdf4llm
+pillow
 typing-extensions
 
 # Evaluation scripts

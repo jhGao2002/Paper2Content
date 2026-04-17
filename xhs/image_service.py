@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from urllib import error, request
 
+from PIL import Image
+
 from xhs.schemas import XHSNoteDraft
 
 
@@ -35,6 +37,24 @@ def _image_model() -> str:
 def _image_size() -> str:
     size = os.getenv("DASHSCOPE_IMAGE_SIZE", "512*512").strip() or "512*512"
     return size.replace("x", "*").replace("X", "*")
+
+
+def _final_image_size() -> str:
+    size = os.getenv("DASHSCOPE_IMAGE_FINAL_SIZE", "").strip()
+    if not size:
+        return _image_size()
+    return size.replace("x", "*").replace("X", "*")
+
+
+def _parse_size(size: str) -> tuple[int, int]:
+    match = size.strip().lower().replace("x", "*").split("*")
+    if len(match) != 2:
+        raise ValueError(f"非法图片尺寸配置：{size}")
+    width = int(match[0].strip())
+    height = int(match[1].strip())
+    if width <= 0 or height <= 0:
+        raise ValueError(f"非法图片尺寸配置：{size}")
+    return width, height
 
 
 def _prompt_extend_enabled() -> bool:
@@ -149,6 +169,17 @@ def _download_file(url: str, target_path: Path) -> None:
     _log_progress(f"图片已保存到：{target_path}")
 
 
+def _resize_to_final_size(image_path: Path, final_size: str) -> None:
+    target_width, target_height = _parse_size(final_size)
+    with Image.open(image_path) as img:
+        if img.size == (target_width, target_height):
+            _log_progress(f"图片尺寸已符合最终分辨率：{final_size}")
+            return
+        resized = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        resized.save(image_path)
+    _log_progress(f"图片已缩放到最终分辨率：{final_size}")
+
+
 def generate_cover_images(
     note: XHSNoteDraft,
     image_count: int = 1,
@@ -169,7 +200,7 @@ def generate_cover_images(
     output_root = output_dir or _image_output_dir()
     output_root.mkdir(parents=True, exist_ok=True)
     _log_progress(
-        f"开始生成封面图，count={max(1, image_count)}，size={_image_size()}，prompt长度={len(prompt)}"
+        f"开始生成封面图，count={max(1, image_count)}，remote_size={_image_size()}，final_size={_final_image_size()}，prompt长度={len(prompt)}"
     )
 
     saved_paths: list[str] = []
@@ -211,6 +242,7 @@ def generate_cover_images(
 
         target_path = output_root / f"xhs_cover_{int(time.time())}_{index}.png"
         _download_file(image_url, target_path)
+        _resize_to_final_size(target_path, _final_image_size())
         saved_paths.append(str(target_path.resolve()))
 
     _log_progress(f"封面图生成结束，共 {len(saved_paths)} 张")

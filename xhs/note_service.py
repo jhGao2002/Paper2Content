@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from xhs.image_service import build_cover_negative_prompt, build_cover_prompt, generate_cover_images
+from xhs.publish_service import build_mcp_publish_args_from_payload, publish_note_via_mcp_sync
 from xhs.schemas import XHSNoteArtifact, XHSNoteDraft, XHSPreparedUploadPayload
 
 
@@ -29,6 +30,56 @@ def _split_sentences(text: str) -> list[str]:
     if parts:
         return parts
     return [item.strip() for item in text.splitlines() if item.strip()]
+
+
+def _topic_summary(text: str, limit: int = 28) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "").strip())
+    if not clean:
+        return "未命名主题"
+    return clean[:limit] + ("..." if len(clean) > limit else "")
+
+
+def _parse_selection_numbers(text: str) -> list[int]:
+    return list(dict.fromkeys(int(item) for item in re.findall(r"\d+", text)))
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    clean = str(text or "").strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _title_from_user_prompt(text: str, limit: int = 20) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "").strip())
+    if not clean:
+        return ""
+    return _truncate_text(clean, limit)
+
+
+def _extract_hash_tags(text: str) -> list[str]:
+    return list(dict.fromkeys(tag.strip() for tag in re.findall(r"#([^\s#]+)", text) if tag.strip()))
+
+
+def _normalize_visibility(text: str, default: str = "公开可见") -> str:
+    raw = str(text or "")
+    if "仅自己" in raw or "自己可见" in raw or "私密" in raw:
+        return "仅自己可见"
+    if "好友" in raw:
+        return "好友可见"
+    return default
+
+
+def _is_confirm_message(text: str) -> bool:
+    raw = str(text or "").strip()
+    keywords = ("确认发布", "可以发布", "确认", "发布吧", "发吧", "开始发布", "确定发布")
+    return any(keyword in raw for keyword in keywords)
+
+
+def _is_cancel_message(text: str) -> bool:
+    raw = str(text or "").strip()
+    keywords = ("取消发布", "先别发", "不要发布", "不发布了", "停止发布")
+    return any(keyword in raw for keyword in keywords)
 
 
 def _extract_user_specified_insight(history: list[dict]) -> str:
@@ -196,6 +247,26 @@ def _build_upload_content(note: XHSNoteDraft) -> str:
     return content
 
 
+VISUAL_DIRECTOR_PROMPT = """你是一个顶级的“科研可视化艺术总监”与“新媒体爆款操盘手”。你的任务是将晦涩的学术 Insight 转化为极具视觉冲击力、能够瞬间抓住用户眼球的图像生成 Prompt。
+
+面对输入的论文 Insight，你必须严格按以下步骤输出：
+
+【步骤 1：概念隐喻化】
+不要使用任何图表、曲线或数学符号。想出两个现实世界中的具体场景，分别隐喻 Insight 中的“反面情况（痛点）”和“正面情况（解法）”。场景必须具有强烈的对比感。
+
+【步骤 2：画面构图与视觉引导】
+设计画面的整体结构（如：左右对比、对角线分割）。明确说明哪一部分是视觉焦点，并使用色彩对比（如：高饱和度对比低饱和度、冷暖色对比）来强制引导用户的注意力。
+
+【步骤 3：爆款中文文案提炼】
+根据 Insight 提炼 1-2 句极具“网感”和痛点穿透力的中文文案。文案要短平快，例如：“别再硬刚脏数据了！”、“一招解决生成崩溃”。
+
+【步骤 4：输出图像模型 Prompt】
+结合前三步，输出一段直接发给图像生成模型（或拼图渲染服务）的指令。指令需包含：
+- 画面主体与隐喻场景的具体描述
+- 构图比例与色彩基调
+- 明确的文本叠加位置与排版建议（大字报风格，突出文案）"""
+
+
 class XHSNoteService:
     def __init__(self, llm, cover_source_provider=None):
         self.llm = llm
@@ -260,6 +331,304 @@ class XHSNoteService:
         repaired = _repair_note(note)
         _log_progress(f"笔记草稿就绪，标题={repaired.title}")
         return repaired
+
+    def build_publish_candidates(
+        self,
+        history: list[dict],
+        memory_notes: list[str] | None = None,
+    ) -> list[dict[str, str]]:
+        candidates: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        pending_user = ""
+        for item in history:
+            role = str(item.get("role", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            if role == "user":
+                pending_user = content
+                continue
+            if role != "assistant" or not pending_user:
+                continue
+            if any(keyword in pending_user for keyword in ("发布到小红书", "发布笔记", "发布图文笔记", "小红书发布")):
+                pending_user = ""
+                continue
+            if "是否确认发布" in content or "请回复编号" in content:
+                pending_user = ""
+                continue
+            normalized = f"qa::{pending_user}::{content}"
+            if normalized in seen:
+                pending_user = ""
+                continue
+            seen.add(normalized)
+            candidates.append(
+                {
+                    "id": str(len(candidates) + 1),
+                    "type": "qa",
+                    "topic": _topic_summary(pending_user),
+                    "question": pending_user,
+                    "content": content,
+                }
+            )
+            pending_user = ""
+
+        for note in memory_notes or []:
+            content = str(note or "").strip()
+            if not content:
+                continue
+            normalized = f"note::{content}"
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(
+                {
+                    "id": str(len(candidates) + 1),
+                    "type": "note",
+                    "topic": _topic_summary(content),
+                    "question": "",
+                    "content": content,
+                }
+            )
+        return candidates
+
+    def render_candidate_list(self, candidates: list[dict[str, str]]) -> str:
+        if not candidates:
+            return (
+                "当前会话里还没有可用于发布的小红书素材。\n"
+                "你可以先继续提问、让系统回答，或者先让我帮你整理/保存笔记，再回来发小红书。"
+            )
+
+        lines = ["我先帮你整理出当前会话里可直接拿来发布的素材，请选择编号，可多选："]
+        for index, item in enumerate(candidates, start=1):
+            label = item.get("question") or item.get("topic") or "未命名主题"
+            kind = "问答" if item.get("type") == "qa" else "笔记"
+            lines.append(f"{index}. [{kind}] {label}")
+        lines.append("请直接回复编号，例如：`1,3` 或 `2 4 5`。")
+        return "\n".join(lines)
+
+    def build_publish_note_from_candidates(self, selected_items: list[dict[str, str]]) -> tuple[XHSNoteDraft, str]:
+        history: list[dict] = []
+        for item in selected_items:
+            question = str(item.get("question", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if item.get("type") == "qa" and question:
+                history.append({"role": "user", "content": question})
+                history.append({"role": "assistant", "content": content})
+            else:
+                history.append({"role": "assistant", "content": content})
+
+        note = self.generate_note(history)
+        source_materials = self._get_cover_source_materials()
+        article_title = _extract_paper_title(source_materials).strip() or note.title.strip() or "本次分享主题"
+        note.body = self._finalize_publish_body(note.body, article_title)
+        note.summary = _truncate_text(note.summary, 80)
+        note.title = _truncate_text(note.title or _topic_summary(article_title, limit=20), 20)
+        return note, article_title
+
+    def _finalize_publish_body(self, body: str, article_title: str) -> str:
+        content = str(body or "").strip()
+        suffix = f"\n\n文章题目：{article_title.strip() or '本次分享主题'}"
+        if suffix.strip() not in content:
+            content = f"{content}{suffix}".strip()
+
+        if len(content) <= 1000:
+            return content
+
+        prompt = (
+            "请在不脱离原始信息的前提下压缩下面这段小红书正文，保留发布风格，"
+            "总长度控制在 1000 字以内，结尾必须保留“文章题目：xxx”。"
+            "只输出压缩后的正文，不要解释。\n\n"
+            f"{content}"
+        )
+        try:
+            compressed = str(self.llm.invoke(prompt).content).strip()
+            compressed = compressed or content
+        except Exception:
+            compressed = content
+        if len(compressed) <= 1000:
+            return compressed
+        suffix = suffix.strip()
+        budget = max(0, 1000 - len(suffix) - 2)
+        return f"{_truncate_text(compressed, budget)}\n\n{suffix}"
+
+    def build_cover_prompt_from_user_prompt(
+        self,
+        note: XHSNoteDraft,
+        user_prompt: str,
+    ) -> str:
+        note.title = _title_from_user_prompt(user_prompt, limit=20) or note.title
+        source_materials = self._get_cover_source_materials()
+        cover_brief = {
+            "core_insight": str(user_prompt or "").strip() or note.cover_hook or note.solved_problem,
+            "supporting_elements": list(note.image_plan.props),
+        }
+        return self._build_detailed_cover_prompt(
+            note=note,
+            cover_brief=cover_brief,
+            source_materials=source_materials,
+            paper_title_short=_build_paper_title_short(_extract_paper_title(source_materials)),
+        )
+
+    def revise_publish_note(
+        self,
+        note: XHSNoteDraft,
+        article_title: str,
+        instruction: str,
+    ) -> XHSNoteDraft:
+        prompt = (
+            "你是小红书内容编辑。请根据用户的修改意见，调整这篇图文草稿。"
+            "不要脱离原始内容瞎编。"
+            "输出必须是 JSON，不要解释，不要使用 Markdown。\n\n"
+            f"当前标题：{note.title}\n"
+            f"当前摘要：{note.summary}\n"
+            f"当前正文：{note.body}\n"
+            f"当前标签：{', '.join(note.hashtags)}\n"
+            f"文章题目：{article_title}\n"
+            f"修改意见：{instruction}\n\n"
+            "输出 JSON：\n"
+            "{\n"
+            '  "title": "20字以内标题",\n'
+            '  "summary": "80字以内摘要",\n'
+            '  "body": "修改后的正文，必须适合小红书，后续会自动补文章题目",\n'
+            '  "hashtags": ["3-6个标签"]\n'
+            "}"
+        )
+        try:
+            raw = self.llm.invoke(prompt).content
+            payload = _extract_json_payload(str(raw))
+            note.title = _truncate_text(str(payload.get("title", note.title)).strip() or note.title, 20)
+            note.summary = _truncate_text(str(payload.get("summary", note.summary)).strip() or note.summary, 80)
+            note.body = self._finalize_publish_body(
+                str(payload.get("body", note.body)).strip() or note.body,
+                article_title,
+            )
+            hashtags = [str(item).strip() for item in payload.get("hashtags", []) if str(item).strip()]
+            if hashtags:
+                note.hashtags = hashtags[:6]
+        except Exception as exc:
+            _log_progress(f"正文修改回退到规则处理：{exc}")
+            note.body = self._finalize_publish_body(note.body, article_title)
+        return note
+
+    def revise_cover_prompt(
+        self,
+        note: XHSNoteDraft,
+        current_prompt: str,
+        instruction: str,
+    ) -> str:
+        prompt = (
+            "你是小红书封面图 prompt 优化师。请基于当前 prompt 和用户修改意见，"
+            "输出一段新的、更完整的中文生图 prompt。不能偏离用户原意。"
+            "只输出新 prompt，不要解释。\n\n"
+            f"当前 prompt：\n{current_prompt}\n\n"
+            f"用户修改意见：\n{instruction}\n\n"
+            f"当前图文主题：{note.solved_problem or note.cover_hook or note.summary}"
+        )
+        try:
+            updated = str(self.llm.invoke(prompt).content).strip()
+            return updated or current_prompt
+        except Exception:
+            return current_prompt
+
+    def render_publish_confirmation(self, workflow: dict) -> str:
+        selected_items = workflow.get("selected_items", []) or []
+        note_data = workflow.get("note_draft") or {}
+        note = XHSNoteDraft.from_dict(note_data)
+        image_prompt = str(workflow.get("image_prompt", "")).strip()
+        visibility = str(workflow.get("visibility", "公开可见")).strip() or "公开可见"
+        article_title = str(workflow.get("article_title", "")).strip()
+
+        lines = ["发布草稿已经准备好了，请你最后确认：", "", "已选素材："]
+        for index, item in enumerate(selected_items, start=1):
+            label = item.get("question") or item.get("topic") or "未命名主题"
+            lines.append(f"{index}. {label}")
+
+        lines.extend(
+            [
+                "",
+                f"发布标题：{note.title}",
+                f"文章题目：{article_title or '未设置'}",
+                f"标签：{'、'.join(note.hashtags) if note.hashtags else '未设置'}",
+                f"可见性：{visibility}",
+                "图片：1 张封面图（确认后自动生成）",
+                "",
+                "正文预览：",
+                note.body,
+                "",
+                "封面图高级 prompt：",
+                image_prompt or "未生成",
+                "",
+                "如果你要修改，可以直接说“把正文改短一点”“封面 prompt 更强调方法创新”“改成仅自己可见”等。",
+                "如果没问题，请明确回复：`确认发布`。",
+            ]
+        )
+        return "\n".join(lines)
+
+    def build_prepared_payload(
+        self,
+        note: XHSNoteDraft,
+        article_title: str,
+        visibility: str = "公开可见",
+        image_paths: list[str] | None = None,
+        is_original: bool = True,
+    ) -> XHSPreparedUploadPayload:
+        source_materials = self._get_cover_source_materials()
+        paper_title = _extract_paper_title(source_materials).strip() or article_title.strip()
+        note.body = self._finalize_publish_body(note.body, article_title)
+        return XHSPreparedUploadPayload(
+            title=note.title.strip(),
+            content=note.body,
+            images=list(image_paths or []),
+            tags=list(dict.fromkeys(note.hashtags)),
+            paper_title=paper_title,
+            paper_title_short=_build_paper_title_short(paper_title),
+            is_original=is_original,
+            visibility=_normalize_visibility(visibility, default="公开可见"),
+        )
+
+    def publish_confirmed_workflow(self, workflow: dict) -> dict:
+        note = XHSNoteDraft.from_dict(workflow.get("note_draft") or {})
+        image_prompt = str(workflow.get("image_prompt", "")).strip()
+        article_title = str(workflow.get("article_title", "")).strip() or note.title
+        visibility = str(workflow.get("visibility", "公开可见")).strip() or "公开可见"
+
+        if not image_prompt:
+            return {"success": False, "message": "封面图 prompt 还未准备好，暂时不能发布。"}
+
+        negative_prompt = build_cover_negative_prompt(note)
+        try:
+            image_paths = generate_cover_images(
+                note,
+                image_count=1,
+                cover_core_insight=str(workflow.get("user_cover_prompt", "")).strip(),
+                prompt_override=image_prompt,
+            )
+        except Exception as exc:
+            return {"success": False, "message": f"封面图生成失败：{exc}"}
+
+        prepared_payload = self.build_prepared_payload(
+            note=note,
+            article_title=article_title,
+            visibility=visibility,
+            image_paths=image_paths,
+            is_original=bool(workflow.get("is_original", True)),
+        )
+        artifact = XHSNoteArtifact(
+            note=note,
+            image_prompt=image_prompt,
+            image_negative_prompt=negative_prompt,
+            cover_source_materials=self._get_cover_source_materials(),
+            cover_core_insight=str(workflow.get("user_cover_prompt", "")).strip(),
+            paper_title=prepared_payload.paper_title,
+            paper_title_short=prepared_payload.paper_title_short,
+            image_paths=image_paths,
+            image_error="",
+            prepared_payload=prepared_payload,
+        )
+        result = self.publish_generated_note(artifact.to_dict())
+        result["artifact"] = artifact.to_dict()
+        return result
 
     def _get_cover_source_materials(self) -> list[dict[str, str]]:
         if self.cover_source_provider is None:
@@ -415,15 +784,20 @@ class XHSNoteService:
             source_excerpt = f"论文标题：{first.get('title', '')}\n原文片段：{first.get('excerpt', '')}"
 
         prompt = (
-            "你是一名论文内容可视化导演，需要把论文核心洞察改写成适合文生图模型的详细中文 prompt。\n"
-            "目标是生成一张 512x512 的小红书封面图，并为后续可能的风格迁移保留清晰主体、清楚层次和稳定语义。\n"
-            "请重点把“问题状态”和“解决状态”都可视化出来，必要时加入统计图形、过程示意、前后对比、辅助物件，"
-            "但不要依赖大量文字，不要把封面做成纯海报字。\n"
-            "如果洞察本身包含因果关系或机制变化，比如分布偏态变正态、参考图检索提升风格迁移、噪声轨迹变稳定，"
-            "要明确描述这种变化应该如何被画面表现出来。\n"
+            f"{VISUAL_DIRECTOR_PROMPT}\n\n"
+            "补充执行要求：\n"
+            "1. 这是一张 512x512 的小红书封面图，画面要有强视觉冲击力。\n"
+            "2. 封面后续可能还会做风格迁移，所以主体轮廓、场景层次、道具语义必须清楚稳定。\n"
+            "3. 允许加入 1-2 句大字报风格中文文案，并明确文案放在哪里，但文字不能遮挡主体。\n"
+            "4. 不要输出图表、坐标轴、分布曲线、数学公式。必须用现实世界的隐喻场景表达论文 insight。\n"
+            "5. 输出里的 detailed_prompt 必须是一段可以直接喂给图像生成模型的中文指令。\n"
             "请只输出 JSON，不要解释：\n"
             "{\n"
-            '  "detailed_prompt": "一段详细中文 prompt，120-220字，直接给文生图模型",\n'
+            '  "negative_metaphor_scene": "反面情况的现实隐喻场景",\n'
+            '  "positive_metaphor_scene": "正面情况的现实隐喻场景",\n'
+            '  "headline_copy": ["1-2句爆款中文文案"],\n'
+            '  "text_overlay_layout": "文案叠加位置与排版建议",\n'
+            '  "detailed_prompt": "一段详细中文 prompt，150-260字，直接给文生图模型",\n'
             '  "supporting_elements": ["最多6个辅助视觉元素"],\n'
             '  "composition": "更具体的构图要求",\n'
             '  "pain_point_visual": "更具体的问题状态视觉描述",\n'
@@ -445,6 +819,8 @@ class XHSNoteService:
             raw = self.llm.invoke(prompt).content
             data = _extract_json_payload(str(raw))
             detailed_prompt = str(data.get("detailed_prompt", "")).strip()
+            headline_copy = [str(item).strip() for item in data.get("headline_copy", []) if str(item).strip()]
+            text_overlay_layout = str(data.get("text_overlay_layout", "")).strip()
             note.image_plan.composition = str(data.get("composition", "")).strip() or note.image_plan.composition
             note.image_plan.pain_point_visual = (
                 str(data.get("pain_point_visual", "")).strip() or note.image_plan.pain_point_visual
@@ -464,7 +840,14 @@ class XHSNoteService:
             if merged_supporting:
                 note.image_plan.props = list(dict.fromkeys(merged_supporting))[:6]
             if detailed_prompt:
-                return detailed_prompt
+                overlay_text = "；".join(headline_copy[:2])
+                overlay_suffix = ""
+                if overlay_text or text_overlay_layout:
+                    overlay_suffix = (
+                        f" 文案建议：{overlay_text or '无'}。"
+                        f" 文字叠加位置：{text_overlay_layout or '画面边缘留白区域，大字报风格，避免遮挡主体'}。"
+                    )
+                return f"{detailed_prompt}{overlay_suffix}".strip()
         except Exception as exc:
             _log_progress(f"详细封面 prompt 生成失败，回退到规则模板：{exc}")
 
@@ -552,29 +935,24 @@ class XHSNoteService:
         _log_progress("开始整理上传用标题、正文和封面图")
         prepared_payload = artifact.get("prepared_payload") or {}
         if prepared_payload:
-            return {
-                "success": True,
-                "message": "已准备好上传内容，当前不会自动调用小红书 MCP 发布。",
-                "data": prepared_payload,
-                "mode": "prepared_upload",
-            }
+            payload = XHSPreparedUploadPayload(**prepared_payload)
+        else:
+            note = XHSNoteDraft.from_dict(artifact.get("note") or {})
+            paper_title = str(artifact.get("paper_title", "")).strip()
+            paper_title_short = str(artifact.get("paper_title_short", "")).strip()
+            payload = XHSPreparedUploadPayload(
+                title=_compose_upload_title(note.title, paper_title_short),
+                content=_build_upload_content(note),
+                images=list(artifact.get("image_paths", []) or []),
+                tags=list(dict.fromkeys(note.hashtags)),
+                paper_title=paper_title,
+                paper_title_short=paper_title_short,
+                is_original=True,
+                visibility="公开可见",
+            )
 
-        note = XHSNoteDraft.from_dict(artifact.get("note") or {})
-        paper_title = str(artifact.get("paper_title", "")).strip()
-        paper_title_short = str(artifact.get("paper_title_short", "")).strip()
-        payload = XHSPreparedUploadPayload(
-            title=_compose_upload_title(note.title, paper_title_short),
-            content=_build_upload_content(note),
-            images=list(artifact.get("image_paths", []) or []),
-            tags=list(dict.fromkeys(note.hashtags)),
-            paper_title=paper_title,
-            paper_title_short=paper_title_short,
-            is_original=True,
-            visibility="公开可见",
-        )
-        return {
-            "success": True,
-            "message": "已准备好上传内容，当前不会自动调用小红书 MCP 发布。",
-            "data": payload.to_dict(),
-            "mode": "prepared_upload",
-        }
+        _log_progress("开始调用小红书 MCP 发布")
+        publish_args = build_mcp_publish_args_from_payload(payload)
+        result = publish_note_via_mcp_sync(publish_args)
+        result["prepared_payload"] = payload.to_dict()
+        return result
