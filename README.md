@@ -1,29 +1,26 @@
-<div align="center">
+<h1 align="center">Paper2Content</h1>
 
-# Paper2Content
-
-> From paper reading to publish-ready content.
-
-<p>
-  <img src="https://img.shields.io/badge/license-MIT-black.svg" alt="License">
-  <img src="https://img.shields.io/badge/python-3.10%2B-3776AB.svg" alt="Python">
-  <img src="https://img.shields.io/badge/LangGraph-Multi--Agent-0E76A8.svg" alt="LangGraph">
-  <img src="https://img.shields.io/badge/MCP-Integrated-FF6B35.svg" alt="MCP">
-  <img src="https://img.shields.io/badge/FAISS-Vector%20Retrieval-009688.svg" alt="FAISS">
-  <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome">
+<p align="center">
+  <strong>From Paper Reading to Publish-Ready Content.</strong>
 </p>
 
-</div>
+<p align="center">
+  一个基于 LangGraph、FAISS 与 MCP 构建的智能文献学习与内容生产系统。
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+" />
+  <img src="https://img.shields.io/badge/LangGraph-Agentic%20Workflow-121D33" alt="LangGraph" />
+  <img src="https://img.shields.io/badge/FAISS-Vector%20Store-0096FF" alt="FAISS" />
+  <img src="https://img.shields.io/badge/MCP-Content%20Publishing-5B6CFF" alt="MCP" />
+  <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome" />
+  <img src="https://img.shields.io/badge/License-Not%20Specified-lightgrey" alt="License Not Specified" />
+</p>
+
+> Paper2Content 并不是一个停留在“Chat with PDF”的 Demo，而是一个把 **文献学习、知识沉淀、内容整理、封面生成、风格迁移与发布工作流** 串成完整闭环的 Agentic System。项目支持长文本解析、历史记忆回溯、多模态图文生成及跨平台自动化分发，形成“文献学习-内容输出-知识复盘”的完整学习闭环。
 
 ---
 
-## Overview
-
-> `Paper2Content` 是一个面向长文献学习与内容生产的多智能体系统：它把 PDF 解析、语义检索、对话式理解、笔记生成、封面出图、风格迁移与发布链路串成一条可执行工作流。
-
-当研究内容从“读懂论文”走向“产出内容”时，痛点通常不在单点能力，而在链路割裂: 文献难解析、上下文难找回、对话难持续、输出难发布、复盘难量化。`Paper2Content` 基于 `LangGraph + FAISS + MCP + Gradio` 搭建了一个完整闭环，让“文献学习 -> 内容输出 -> 知识复盘”在同一套工程里完成，并进一步打通“文献到内容创作”的最后一公里。
-
----
 
 ## Key Features
 
