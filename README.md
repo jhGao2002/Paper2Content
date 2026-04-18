@@ -1,184 +1,130 @@
+<div align="center">
+
 # Paper2Content
 
 > From paper reading to publish-ready content.
 
-## 项目效果演示
+<p>
+  <img src="https://img.shields.io/badge/license-MIT-black.svg" alt="License">
+  <img src="https://img.shields.io/badge/python-3.10%2B-3776AB.svg" alt="Python">
+  <img src="https://img.shields.io/badge/LangGraph-Multi--Agent-0E76A8.svg" alt="LangGraph">
+  <img src="https://img.shields.io/badge/MCP-Integrated-FF6B35.svg" alt="MCP">
+  <img src="https://img.shields.io/badge/FAISS-Vector%20Retrieval-009688.svg" alt="FAISS">
+  <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome">
+</p>
 
-- 小红书实际效果展示：[`Paper2Content Demo`](https://www.xiaohongshu.com/user/profile/66c61447000000001d022d71?xsec_token=ABPFxo8ykoitViGyQmpeYXzn6WmSGoKOnquRuc0f-R3yU%3D&xsec_source=pc_search)
+</div>
 
-Paper2Content 是一个基于 LangGraph、FAISS 与 MCP 构建的论文学习与内容生产系统。它不只是在做 “Chat with PDF”，而是把论文解析、检索问答、会话沉淀、图文草稿生成、封面生成、风格迁移和小红书发布串成了一条完整工作流。
+---
 
-当前项目适合这几类场景：
+## Overview
 
-- 读论文时，希望能持续追问、对比多篇文献并保留上下文。
-- 想把论文 insight 整理成适合发布的小红书图文。
-- 想把问答过程沉淀为可复用的会话资产，而不是一次性聊天记录。
+> `Paper2Content` 是一个面向长文献学习与内容生产的多智能体系统：它把 PDF 解析、语义检索、对话式理解、笔记生成、封面出图、风格迁移与发布链路串成一条可执行工作流。
 
-## 核心能力
+当研究内容从“读懂论文”走向“产出内容”时，痛点通常不在单点能力，而在链路割裂: 文献难解析、上下文难找回、对话难持续、输出难发布、复盘难量化。`Paper2Content` 基于 `LangGraph + FAISS + MCP + Gradio` 搭建了一个完整闭环，让“文献学习 -> 内容输出 -> 知识复盘”在同一套工程里完成，并进一步打通“文献到内容创作”的最后一公里。
 
-- PDF 原生入库：使用 `PyMuPDF4LLM` 解析论文，并做父子分块后写入 FAISS。
-- 多 Agent 问答：`Supervisor` 负责任务路由，协调 `ResearchAgent`、`NoteAgent`、`GeneralAgent`。
-- 长期记忆：对话可压缩并写入会话级语义记忆，用于后续问答时的上下文补充。
-- 图文生产：从会话历史生成小红书笔记草稿、封面提示词和发布参数。
-- 发布链路：支持小红书 MCP 发布，以及封面风格迁移 MCP。
+---
 
-## 项目简介
+## Key Features
 
-Paper2Content 解决的是一条经常断裂的链路：
+- 🧠 **多智能体协同编排**：以 `Supervisor + ResearchAgent + NoteAgent + GeneralAgent + Synthesizer` 组成主流程，在问答、检索、内容生成与总结之间动态路由。
+- 📄 **面向长文献的双层切块检索**：使用 `PyMuPDF4LLM` 将 PDF 转为 Markdown，再执行 `parent-child chunking`，子块召回、父块回填，兼顾召回率与上下文完整性。
+- 🔍 **语义检索与记忆融合**：本地 `FAISS` 同时维护文献知识库与用户语义记忆，问答时将会话历史压缩、召回、重排后注入上下文，提升多轮交互稳定性。
+- ✍️ **从学习到内容创作的生产链路**：基于会话历史与记忆笔记自动生成小红书草稿，支持封面提示词生成、DashScope 出图、MCP 风格迁移与发布准备。
+- 📊 **自带评测与复盘能力**：仓库内置 `Ragas` 评测脚本与 `LangSmith` tracing 配置，可对不同检索策略进行指标、耗时与 Token 成本对比，形成可复现的优化闭环。
 
-`读论文 -> 做问答 -> 形成理解 -> 整理为内容 -> 发布 -> 复盘`
+---
 
-这里的“复盘”不是把历史对话简单压缩后回注。更准确地说：
+## Architecture
 
-- 会话内的历史内容会被压缩成长期记忆，帮助后续继续问答。
-- 内容产出后的复盘，可以回到小红书发布侧查看成稿表现，再继续迭代标题、正文、封面和发布策略。
+核心数据流如下:
 
-也就是说，系统既支持“问答连续性”，也支持“内容发布后的结果复看”。
+`PDF -> Markdown 解析 -> Parent/Child Chunking -> Embedding-3 向量化 -> FAISS 索引 -> Multi-Query Retrieval -> Parent Context 回填 -> Supervisor 路由 -> Agent 生成/总结 -> 内容草稿/封面/发布 -> LangSmith & Ragas 复盘`
 
-## 项目结构
+```mermaid
+flowchart TD
+    A[PDF Document] --> B[PyMuPDF4LLM Parse to Markdown]
+    B --> C[Parent / Child Chunking]
+    C --> D[Embedding-3 Vectorization]
+    D --> E[FAISS pdf_knowledge]
+    H[Session History / Notes] --> I[Semantic Memory Store]
+    E --> F[ResearchAgent Retrieval]
+    I --> F
+    F --> G[Supervisor]
+    G --> R[ResearchAgent]
+    G --> N[NoteAgent]
+    G --> Q[GeneralAgent]
+    R --> S[Synthesizer]
+    N --> S
+    Q --> S
+    S --> U[Answer / Note Draft]
+    U --> V[DashScope Image Generation]
+    U --> W[Style Transfer MCP]
+    U --> X[XHS MCP Publish Workflow]
+    S --> Y[LangSmith Tracing]
+    E --> Z[Ragas Evaluation Pipeline]
+```
+
+### Core Modules
 
 ```text
 paper_assitant/
-├── main.py                         # 应用入口，启动 Gradio 并组装 MultiAgentApp
-├── config.py                       # 主模型、快速模型、Embedding、LangSmith 配置
-├── requirements.txt                # Python 依赖
-├── .env.example                    # 环境变量模板
-├── document/
-│   ├── loader.py                   # PDF 解析与入库
-│   ├── chunking.py                 # 父子分块
-│   ├── registry.py                 # documents.json 元数据管理
-│   └── source_excerpt.py           # 封面素材抽取
-├── graph/
-│   ├── builder.py                  # LangGraph 主图构建
-│   └── supervisor.py               # Supervisor 路由与任务编排
-├── agents/
-│   ├── research.py                 # 文档检索问答
-│   ├── note_agent.py               # 笔记整理与发布相关路由
-│   ├── general.py                  # 通用问答
-│   └── base.py                     # ReAct Agent 基础封装
-├── memory/
-│   ├── store.py                    # 记忆读写与向量存储初始化
-│   └── compression.py              # 对话压缩
-├── session/
-│   └── manager.py                  # 会话生命周期管理
-├── ui/
-│   └── gradio_app.py               # Gradio 界面
-├── xhs/
-│   ├── note_service.py             # 小红书图文草稿生成与发布编排
-│   ├── image_service.py            # 封面图生成
-│   ├── style_transfer_service.py   # 风格迁移 MCP 调用
-│   └── publish_service.py          # 小红书 MCP 发布调用
-├── eval/                           # RAG 评测脚本
-├── docs/                           # 补充文档
-├── vectorstores/                   # FAISS 持久化目录
-├── documents.json                  # 文档注册表
-├── sessions.json                   # 会话元数据
-└── sessions.db                     # LangGraph SQLite checkpoint
+|-- main.py                      # 应用入口，组合 Gradio UI 与 MultiAgentApp
+|-- config.py                    # LLM / Embedding / LangSmith 配置
+|-- document/                    # PDF 解析、切块、文献注册
+|-- graph/                       # LangGraph 工作流与 Supervisor 路由
+|-- agents/                      # Research / Note / General Agents
+|-- memory/                      # 本地语义记忆与会话上下文压缩
+|-- session/                     # sessions.json + sessions.db 管理
+|-- xhs/                         # 小红书草稿、出图、风格迁移、发布链路
+|-- style/                       # 风格图管理
+|-- ui/                          # Gradio 界面
+|-- eval/                        # Ragas 评测脚本与实验配置
+|-- docs/assets/                 # README 资产
+`-- vectorstores/                # FAISS 索引落盘目录
 ```
 
-## 系统架构
+---
 
-### 1. 整体链路
+## Benchmarks / Performance
 
-```text
-用户
-  ↓
-Gradio UI
-  ↓
-MultiAgentApp
-  ├── 论文问答主链
-  │   └── Supervisor -> ResearchAgent / NoteAgent / GeneralAgent
-  └── 内容生产侧链
-      └── XHSNoteService -> 封面生成 -> 风格迁移 -> MCP 发布
-```
-
-### 2. 论文问答主链
-
-```text
-用户提问
-  -> 会话历史压缩
-  -> 长期记忆检索
-  -> Supervisor 路由
-     -> ResearchAgent：检索论文、抽取证据、组织回答
-     -> NoteAgent：整理笔记、生成图文草稿、处理发布相关意图
-     -> GeneralAgent：通用解释、非检索型回答
-  -> 返回答案
-```
-
-这条链路负责保证论文问答能力本身的稳定性。对复杂问题，`Supervisor` 会拆步骤，再由不同 Agent 分工执行并汇总结果。
-
-### 3. 内容生产侧链
-
-```text
-session chat history
-  -> XHSNoteService
-  -> XHSNoteDraft / XHSNoteArtifact
-  -> Image Prompt
-  -> DashScope Image Generation
-  -> Style Transfer MCP
-  -> XHS MCP publish_content
-```
-
-这条侧链消费的是会话中已经沉淀下来的内容，不直接干扰论文问答主链。这样可以把“回答问题”和“生成可发布内容”拆开，方便单独迭代。
-
-### 4. 状态与持久化
-
-- `sessions.db`：保存 LangGraph 会话状态与消息 checkpoint。
-- `sessions.json`：保存会话元数据，如标题、创建时间。
-- `documents.json`：保存论文标题、摘要、分块数量等元信息。
-- `vectorstores/pdf_knowledge/`：论文知识库向量索引。
-- `vectorstores/user_semantic_memory/`：长期记忆向量索引。
-- `result/`：评测、生成图片等输出目录。
-
-## 评估结果
-
-### 1. RAG 检索评测
-
-当前项目保留了统一评测入口：
-
-```powershell
-python eval/eval.py
-```
-
-已对 3 组检索方案做过对比：
+项目内置的 `eval/eval.py` 对 3 种检索方案进行了统一评测，关键指标如下:
 
 | Variant | Context Precision | Context Recall | Retrieval F1 | Answer Correctness | Faithfulness |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `01_fixed_chunk_embedding3` | 0.9600 | 0.8633 | 0.8760 | 0.7251 | 0.9293 |
 | `02_parent_child_lexical` | 0.3800 | 0.3933 | 0.2347 | 0.4006 | 0.8492 |
-| `03_parent_child_embedding3` | 0.9400 | 0.9250 | 0.8947 | 0.7537 | 0.9519 |
+| `03_parent_child_embedding3` | **0.9400** | **0.9250** | **0.8947** | **0.7537** | **0.9519** |
 
-当前最佳方案是 `03_parent_child_embedding3`，也就是“父子分块 + Embedding-3”。
+**结论非常明确：当前仓库中表现最优的方案是 `03_parent_child_embedding3`。**
 
-### 2. LangSmith 运行观测优化
+- **Context Recall** 从 `0.8633` 提升到 `0.9250`
+- **Retrieval F1** 从 `0.8760` 提升到 `0.8947`
+- **Answer Correctness** 从 `0.7251` 提升到 `0.7537`
+- **Faithfulness** 提升到 `0.9519`
 
-在最新一轮 LangSmith 观测中，项目主链路的响应时间和 Token 消耗都有明显下降：
+仓库现有 LangSmith 记录还给出了链路优化前后的运行收益:
 
-| 指标 | 优化前 | 优化后 | 变化 |
+| Metric | Before | After | Delta |
 | --- | ---: | ---: | ---: |
-| 响应时间 | 99.44 s | 56.72 s | 降低约 43.0% |
-| Token 用量 | 4969 | 3150 | 降低约 36.6% |
+| Runtime | 99.44 s | 56.72 s | **-43.0%** |
+| Total Tokens | 4969 | 3150 | **-36.6%** |
 
-这意味着当前版本在保持核心能力的同时：
+![LangSmith Eval Result](docs/assets/langsmith-eval-result.jpg)
 
-- 平均响应更快，用户等待时间明显下降。
-- 推理成本更低，长链路问答与内容生产更可持续。
+---
 
-LangSmith 截图如下：
+## Quick Start
 
-![LangSmith 评测结果](docs/assets/langsmith-eval-result.jpg)
-
-## 快速开始
-
-### 1. 环境要求
+### 1. Prerequisites
 
 - Python `3.10+`
-- 至少一组可用的 GLM / 智谱 API Key
-- 可选：DashScope 图片生成能力
-- 可选：小红书 MCP 服务
-- 可选：风格迁移 MCP 服务
+- 可用的智谱模型与向量接口
+- 可选的 DashScope 图像生成能力
+- 可选的小红书 MCP 服务
+- 可选的风格迁移 MCP 服务
 
-### 2. 安装依赖
+### 2. Clone & Install
 
 ```powershell
 git clone https://github.com/jhGao2002/myPaperAssistant.git
@@ -189,9 +135,9 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-### 3. 配置环境变量
+### 3. Configure Environment
 
-至少需要配置这些核心参数：
+基础模型与向量检索配置:
 
 ```env
 LLM_MODEL_ID=glm-5
@@ -200,17 +146,14 @@ LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
 
 ZHIPU_API_KEY=your_zhipu_api_key_here
 ZHIPU_URL=https://open.bigmodel.cn/api/paas/v4/
+EMBED_BATCH_SIZE=64
 
 FAISS_INDEX_ROOT=vectorstores
 FAISS_USE_GPU=0
 FAISS_GPU_DEVICE=0
-
-GRADIO_SHARE=0
-GRADIO_SERVER_NAME=127.0.0.1
-GRADIO_SERVER_PORT=7861
 ```
 
-如果你要跑完整图文生产链路，再补充这些可选配置：
+可选的内容生产与发布配置:
 
 ```env
 DASHSCOPE_API_KEY=your_dashscope_api_key
@@ -219,57 +162,51 @@ XHS_MCP_ENDPOINT=http://localhost:18060/mcp
 STYLE_TRANSFER_MCP_ENDPOINT=http://127.0.0.1:1234/mcp
 ```
 
-如果你要接 LangSmith 观测：
+可选的可观测性配置:
 
 ```env
 LANGSMITH_TRACING=1
 LANGSMITH_API_KEY=your_langsmith_api_key
 LANGSMITH_PROJECT=paper2content
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 ```
 
-### 4. 外部 MCP 服务
-
-README 中提到的两个 MCP 服务来源如下：
-
-- 小红书 MCP 服务：[`xpzouying/xiaohongshu-mcp`](https://github.com/xpzouying/xiaohongshu-mcp)
-- 风格迁移 MCP 服务：[`jhGao2002/ADServer`](https://github.com/jhGao2002/ADServer)
-
-如果这两个服务没有启动，论文问答功能仍然可以使用，但“小红书发布”和“风格迁移”相关能力会不可用。
-
-### 5. 启动应用
+### 4. Run the App
 
 ```powershell
 python main.py
 ```
 
-默认访问地址：
+默认访问地址:
 
 ```text
 http://127.0.0.1:7861
 ```
 
-### 6. 典型使用路径
+### 5. Typical Workflow
 
-1. 在 Gradio 页面中新建会话。
-2. 上传 PDF，完成文档入库。
-3. 勾选当前会话要参与问答的论文。
-4. 基于论文进行问答、对比和总结。
-5. 让系统整理成小红书图文草稿。
-6. 按需生成封面、做风格迁移并发布。
+1. 在 Gradio 界面上传论文 PDF。
+2. 系统执行 Markdown 解析、双层切块与向量索引。
+3. 围绕论文进行多轮提问，交由 `Supervisor` 路由到不同 Agent。
+4. 将有效洞察沉淀为会话记忆与笔记候选。
+5. 触发内容生成链路，生成小红书草稿与封面图。
+6. 按需接入风格迁移与 MCP 发布流程。
 
-## 数据与产物
+### 6. Run Evaluation
 
-- `documents.json`：论文注册表，记录标题、摘要、分块数量等。
-- `sessions.json`：会话列表与标题。
-- `sessions.db`：LangGraph 会话状态数据库。
-- `vectorstores/`：FAISS 索引及明文 metadata。
-- `result/eval_runs/`：RAG 评测结果。
-- `result/xhs_note_images/`：生成的小红书封面图。
+```powershell
+python eval/eval.py
+```
 
-如果你只是想重建索引或清空历史，可以优先备份这些文件后再删除，而不是直接清仓整个仓库。
+如果需要重新生成评测集:
+
+```powershell
+python eval/eval.py --regenerate-dataset
+```
+
+---
 
 ## License
 
-本项目采用 [MIT License](LICENSE)。
+本项目采用 [MIT License](LICENSE) 开源协议。
 
-选择 MIT 的原因很简单：它是最常见、最易理解、协作成本最低的开源协议之一，适合当前这种以学习、实验和二次开发为主的项目形态。
