@@ -371,8 +371,9 @@ VISUAL_DIRECTOR_PROMPT = """你是一个顶级的“科研可视化艺术总监�
 
 
 class XHSNoteService:
-    def __init__(self, llm, cover_source_provider=None):
+    def __init__(self, llm, fast_llm=None, cover_source_provider=None):
         self.llm = llm
+        self.fast_llm = fast_llm or llm
         self.cover_source_provider = cover_source_provider
 
     def _build_generation_prompt(self, history: list[dict]) -> str:
@@ -568,17 +569,7 @@ class XHSNoteService:
             fallback_title=note.title,
             limit=15,
         ) or note.title
-        source_materials = self._get_cover_source_materials()
-        cover_brief = {
-            "core_insight": str(user_prompt or "").strip() or note.cover_hook or note.solved_problem,
-            "supporting_elements": list(note.image_plan.props),
-        }
-        return self._build_detailed_cover_prompt(
-            note=note,
-            cover_brief=cover_brief,
-            source_materials=source_materials,
-            paper_title_short=_build_paper_title_short(_extract_paper_title(source_materials)),
-        )
+        return self._build_title_based_cover_prompt(note.title)
 
     def summarize_title_from_prompt(
         self,
@@ -600,7 +591,7 @@ class XHSNoteService:
             f"用户prompt：{prompt_text}"
         )
         try:
-            raw = str(self.llm.invoke(prompt).content).strip()
+            raw = str(self.fast_llm.invoke(prompt).content).strip()
         except Exception as exc:
             _log_progress(f"标题总结失败，改用规则兜底：{exc}")
             raw = ""
@@ -615,6 +606,50 @@ class XHSNoteService:
         if not candidate:
             candidate = _fallback_short_title(fallback_title, limit=limit)
         return _truncate_text(candidate, limit)
+
+    def _build_title_based_cover_prompt(self, title: str) -> str:
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            return ""
+
+        prompt = (
+            "# Role\n"
+            "You are a top-tier visual concept designer and prompt engineer. Your core task is to transform a refined viewpoint title "
+            "into a highly striking English VLM prompt, and force the visual model to render the exact original title text as the core visual focus.\n\n"
+            "# Objective & Visual Style\n"
+            "Create viewpoint-driven conceptual art.\n"
+            "1. Use split or opposing composition, such as left-right split, diagonal split, or broken symmetry.\n"
+            "2. Use symbolic figures or symbolic objects instead of real faces or literal daily-life scenes.\n"
+            "3. Use strong warm-cool contrast like teal and orange or ice blue and neon red.\n"
+            "4. Make the central conflict obvious at first glance.\n"
+            "5. The exact full title text must be a core visual focal point.\n\n"
+            "# Output Format\n"
+            "Output one JSON object only.\n"
+            "{\n"
+            '  "vlm_prompt": "final English prompt"\n'
+            "}\n\n"
+            "# Prompt Generation Rules\n"
+            '- Use wording like `Bold 3D typography saying "原本的标题"` or `The exact text "原本的标题" is written in...`.\n'
+            "- Except for the quoted original title, all content must be pure English comma-separated phrases.\n"
+            "- The prompt must end with `masterpiece, 8k resolution, highly detailed, dramatic lighting, conceptual art`.\n\n"
+            f"Input: {clean_title}"
+        )
+        try:
+            _log_progress("使用 fast_llm 基于标题生成英文高级封面 prompt")
+            raw = str(self.fast_llm.invoke(prompt).content).strip()
+            payload = _extract_json_payload(raw)
+            candidate = str(payload.get("vlm_prompt", "")).strip()
+            if candidate:
+                return candidate
+        except Exception as exc:
+            _log_progress(f"标题驱动高级 prompt 生成失败，回退模板：{exc}")
+
+        return (
+            f'A dramatic split composition, symbolic geometric elements, central conflict, '
+            f'bold 3D typography saying "{clean_title}", strong teal and orange contrast, '
+            f'glowing abstract objects, conceptual editorial illustration, masterpiece, '
+            f'8k resolution, highly detailed, dramatic lighting, conceptual art'
+        )
 
     def revise_publish_note(
         self,

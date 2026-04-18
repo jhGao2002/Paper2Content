@@ -120,6 +120,7 @@ class MultiAgentApp:
         self.last_retrieved_docs = ""
         self.xhs_note_service = XHSNoteService(
             llm=self.llm,
+            fast_llm=self.fast_llm,
             cover_source_provider=self._get_cover_source_materials,
         )
 
