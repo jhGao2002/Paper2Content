@@ -87,11 +87,11 @@ paper_assitant/
 
 项目内置的 `eval/eval.py` 对 3 种检索方案进行了统一评测，关键指标如下:
 
-| Variant | Context Precision | Context Recall | Retrieval F1 | Answer Correctness | Faithfulness |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `01_fixed_chunk_embedding3` | 0.9600 | 0.8633 | 0.8760 | 0.7251 | 0.9293 |
-| `02_parent_child_lexical` | 0.3800 | 0.3933 | 0.2347 | 0.4006 | 0.8492 |
-| `03_parent_child_embedding3` | **0.9400** | **0.9250** | **0.8947** | **0.7537** | **0.9519** |
+| Variant | Context Recall | Retrieval F1 | Answer Correctness | Faithfulness |
+| --- | ---: | ---: | ---: | ---: |
+| `01_fixed_chunk_embedding3` | 0.8633 | 0.8760 | 0.7251 | 0.9293 |
+| `02_parent_child_lexical` | 0.3933 | 0.2347 | 0.4006 | 0.8492 |
+| `03_parent_child_embedding3` | **0.9250** | **0.8947** | **0.7537** | **0.9519** |
 
 **结论非常明确：当前仓库中表现最优的方案是 `03_parent_child_embedding3`。**
 
@@ -206,4 +206,3 @@ python eval/eval.py --regenerate-dataset
 ## License
 
 本项目采用 [MIT License](LICENSE) 开源协议。
-
