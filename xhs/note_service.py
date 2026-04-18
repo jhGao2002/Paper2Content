@@ -185,67 +185,6 @@ def _is_cancel_message(text: str) -> bool:
     return any(keyword in raw for keyword in keywords)
 
 
-def _extract_user_specified_insight(history: list[dict]) -> str:
-    patterns = [
-        r"(?:我的创新idea|我的创新想法|我的idea|我自己的idea|我的insight|核心insight|核心洞察|创新点)\s*[：:]\s*(.+)",
-        r"(?:请用|就用|按|使用)\s*(.+?)\s*(?:作为|当作)\s*(?:insight|核心洞察|创新idea|idea)",
-    ]
-    for item in reversed(history):
-        if item.get("role") != "user":
-            continue
-        content = str(item.get("content", "")).strip()
-        if not content:
-            continue
-        for pattern in patterns:
-            match = re.search(pattern, content, flags=re.IGNORECASE)
-            if match:
-                insight = match.group(1).strip(" \n\r\t,，。；;")
-                if insight:
-                    return insight
-    return ""
-
-
-def _fallback_cover_brief_from_source(source_materials: list[dict[str, str]]) -> dict[str, object]:
-    if not source_materials:
-        return {"core_insight": "", "supporting_elements": []}
-
-    excerpt = str(source_materials[0].get("excerpt", "")).strip()
-    title = str(source_materials[0].get("title", "")).strip().lower()
-    sentences = _split_sentences(excerpt)
-    core_insight = ". ".join(sentences[:2]).strip()
-    if core_insight and excerpt.count(".") > 0 and not core_insight.endswith("."):
-        core_insight += "."
-
-    text = f"{title}\n{excerpt}".lower()
-    elements: list[str] = []
-    keyword_map = [
-        ("reference", "reference image panel"),
-        ("style image", "style reference image"),
-        ("retrieval", "retrieved image grid"),
-        ("attention", "attention heatmap overlay"),
-        ("diffusion", "diffusion denoising trajectory"),
-        ("style transfer", "content image and stylized result"),
-        ("memory", "memory cards or note blocks"),
-    ]
-    for keyword, visual in keyword_map:
-        if keyword in text and visual not in elements:
-            elements.append(visual)
-
-    if not elements:
-        elements = ["paper page highlights", "diagram card", "before-and-after comparison"]
-
-    return {
-        "core_insight": core_insight or excerpt[:220].strip(),
-        "supporting_elements": elements[:4],
-        "main_subject": "paper mechanism illustration with result comparison",
-        "scene": "editorial science cover scene focused on the paper's method and outcome",
-        "composition": "central mechanism with supporting visual elements around it",
-        "pain_point_visual": "the paper's original problem setting, input condition, or challenge",
-        "solution_visual": "the proposed method, key mechanism, or improved output result",
-        "style_keywords": ["editorial science cover", "clean visual explanation", "high clarity"],
-    }
-
-
 def _extract_json_payload(raw: str) -> dict:
     text = raw.strip()
     if text.startswith("```"):
@@ -350,25 +289,6 @@ def _build_upload_content(note: XHSNoteDraft) -> str:
     return content
 
 
-VISUAL_DIRECTOR_PROMPT = """你是一个顶级的“科研可视化艺术总监”与“新媒体爆款操盘手”。你的任务是将晦涩的学术 Insight 转化为极具视觉冲击力、能够瞬间抓住用户眼球的图像生成 Prompt。
-
-面对输入的论文 Insight，你必须严格按以下步骤输出：
-
-【步骤 1：概念隐喻化】
-不要使用任何图表、曲线或数学符号。想出两个现实世界中的具体场景，分别隐喻 Insight 中的“反面情况（痛点）”和“正面情况（解法）”。场景必须具有强烈的对比感。
-
-【步骤 2：画面构图与视觉引导】
-设计画面的整体结构（如：左右对比、对角线分割）。明确说明哪一部分是视觉焦点，并使用色彩对比（如：高饱和度对比低饱和度、冷暖色对比）来强制引导用户的注意力。
-
-【步骤 3：爆款中文文案提炼】
-根据 Insight 提炼 1-2 句极具“网感”和痛点穿透力的中文文案。文案要短平快，例如：“别再硬刚脏数据了！”、“一招解决生成崩溃”。
-
-【步骤 4：输出图像模型 Prompt】
-结合前三步，输出一段直接发给图像生成模型（或拼图渲染服务）的指令。指令需包含：
-- 画面主体与隐喻场景的具体描述
-- 构图比例与色彩基调
-- 明确的文本叠加位置与排版建议（大字报风格，突出文案）"""
-
 
 class XHSNoteService:
     def __init__(self, llm, fast_llm=None, cover_source_provider=None):
@@ -421,7 +341,7 @@ class XHSNoteService:
         if not history:
             raise ValueError("当前会话还没有可整理的问答记录。")
 
-        _log_progress(f"开始整理笔记正文，history条数={len(history)}")
+        _log_progress(f"Building note draft from history, turns={len(history)}")
         prompt = self._build_generation_prompt(history)
         try:
             llm_start = time.perf_counter()
@@ -635,7 +555,7 @@ class XHSNoteService:
             f"Input: {clean_title}"
         )
         try:
-            _log_progress("使用 fast_llm 基于标题生成英文高级封面 prompt")
+            _log_progress("Using fast_llm to build the advanced English cover prompt from title")
             raw = str(self.fast_llm.invoke(prompt).content).strip()
             payload = _extract_json_payload(raw)
             candidate = str(payload.get("vlm_prompt", "")).strip()
@@ -859,246 +779,6 @@ class XHSNoteService:
             )
         return normalized
 
-    def _translate_to_chinese_if_needed(self, text: str) -> str:
-        raw = text.strip()
-        if not raw:
-            return ""
-        if re.search(r"[\u4e00-\u9fff]", raw):
-            return raw
-
-        prompt = (
-            "请将下面这段论文核心洞察忠实翻译成自然、简洁的中文。"
-            "只输出翻译结果，不要解释，不要加引号。\n\n"
-            f"{raw}"
-        )
-        try:
-            _log_progress("检测到英文核心洞察，开始翻译成中文")
-            translated = str(self.llm.invoke(prompt).content).strip()
-            return translated or raw
-        except Exception as exc:
-            _log_progress(f"英文洞察翻译失败，暂时保留原文：{exc}")
-            return raw
-
-    def _build_cover_brief(
-        self,
-        note: XHSNoteDraft,
-        history: list[dict],
-        source_materials: list[dict[str, str]],
-    ) -> dict[str, object]:
-        user_insight = _extract_user_specified_insight(history)
-        if user_insight:
-            _log_progress("检测到用户明确指定的 insight，封面提炼优先使用用户创新 idea")
-            return {
-                "core_insight": user_insight,
-                "supporting_elements": list(note.image_plan.props),
-            }
-
-        if not source_materials:
-            return {
-                "core_insight": note.solved_problem or note.cover_hook or note.summary,
-                "supporting_elements": list(note.image_plan.props),
-            }
-
-        source_text = "\n\n".join(
-            f"[{item['title'] or item['source']}]\n{item['excerpt']}" for item in source_materials
-        )
-        prompt = (
-            "你是一名负责论文封面视觉策划的编辑。\n"
-            "请只根据给定论文原文的 abstract 或 introduction 片段，提炼适合文生图封面的核心洞察。\n"
-            "不要使用对话总结，不要补充原文之外的结论。\n"
-            "如果原文是英文，core_insight 必须翻译成忠实、简洁的中文；如果原文是中文，保持中文。\n"
-            "输出 JSON，不要解释：\n"
-            "{\n"
-            '  "core_insight": "1-2句中文，表达论文最核心洞察",\n'
-            '  "supporting_elements": ["2-5个辅助理解该洞察的视觉元素，不要只是重复文字"],\n'
-            '  "pain_point_visual": "研究对象、输入条件或待解决问题的视觉表现",\n'
-            '  "solution_visual": "关键机制、效果或输出结果的视觉表现",\n'
-            '  "main_subject": "画面主体",\n'
-            '  "scene": "适合封面的场景",\n'
-            '  "composition": "构图",\n'
-            '  "style_keywords": ["最多4个风格关键词"]\n'
-            "}\n\n"
-            f"论文原文片段：\n{source_text}"
-        )
-
-        try:
-            _log_progress("调用 LLM 从原文摘要/引言提炼封面核心洞察")
-            raw = self.llm.invoke(prompt).content
-            data = _extract_json_payload(str(raw))
-        except Exception as exc:
-            _log_progress(f"原文洞察提炼失败，回退到原文片段启发式提炼：{exc}")
-            fallback = _fallback_cover_brief_from_source(source_materials)
-            if fallback.get("core_insight"):
-                fallback["core_insight"] = self._translate_to_chinese_if_needed(
-                    str(fallback.get("core_insight", "")).strip()
-                )
-                note.image_plan.main_subject = str(fallback.get("main_subject", "")).strip() or note.image_plan.main_subject
-                note.image_plan.scene = str(fallback.get("scene", "")).strip() or note.image_plan.scene
-                note.image_plan.composition = str(fallback.get("composition", "")).strip() or note.image_plan.composition
-                note.image_plan.pain_point_visual = (
-                    str(fallback.get("pain_point_visual", "")).strip() or note.image_plan.pain_point_visual
-                )
-                note.image_plan.solution_visual = (
-                    str(fallback.get("solution_visual", "")).strip() or note.image_plan.solution_visual
-                )
-                fallback_styles = [str(item).strip() for item in fallback.get("style_keywords", []) if str(item).strip()]
-                if fallback_styles:
-                    note.image_plan.style_keywords = fallback_styles
-                return fallback
-            return {
-                "core_insight": note.solved_problem or note.cover_hook or note.summary,
-                "supporting_elements": list(note.image_plan.props),
-            }
-
-        core_insight = str(data.get("core_insight", "")).strip() or note.solved_problem or note.summary
-        core_insight = self._translate_to_chinese_if_needed(core_insight)
-        supporting = [str(item).strip() for item in data.get("supporting_elements", []) if str(item).strip()]
-        note.image_plan.main_subject = str(data.get("main_subject", "")).strip() or note.image_plan.main_subject
-        note.image_plan.scene = str(data.get("scene", "")).strip() or note.image_plan.scene
-        note.image_plan.composition = str(data.get("composition", "")).strip() or note.image_plan.composition
-        note.image_plan.pain_point_visual = (
-            str(data.get("pain_point_visual", "")).strip() or note.image_plan.pain_point_visual
-        )
-        note.image_plan.solution_visual = (
-            str(data.get("solution_visual", "")).strip() or note.image_plan.solution_visual
-        )
-        extracted_styles = [str(item).strip() for item in data.get("style_keywords", []) if str(item).strip()]
-        if extracted_styles:
-            note.image_plan.style_keywords = extracted_styles
-        return {
-            "core_insight": core_insight,
-            "supporting_elements": supporting,
-        }
-
-    def _build_detailed_cover_prompt(
-        self,
-        note: XHSNoteDraft,
-        cover_brief: dict[str, object],
-        source_materials: list[dict[str, str]],
-        paper_title_short: str,
-    ) -> str:
-        core_insight = str(cover_brief.get("core_insight", "")).strip() or note.solved_problem or note.summary
-        supporting_elements = [
-            str(item).strip()
-            for item in cover_brief.get("supporting_elements", []) or []
-            if str(item).strip()
-        ]
-        source_excerpt = ""
-        if source_materials:
-            first = source_materials[0]
-            source_excerpt = f"参考资料标题：{first.get('title', '')}\n参考资料摘录：{first.get('excerpt', '')}"
-
-        prompt = (
-            f"{VISUAL_DIRECTOR_PROMPT}\n\n"
-            "请基于下面的信息，为封面图生成一个高保真 detailed_prompt。\n"
-            "要求：\n"
-            "1. 图片必须忠实表达 core_insight，不能偷换成泛泛的 AI、论文、科技感插图。\n"
-            "2. 如果 core_insight 里有先后关系、方法选择、因果关系、对比关系，画面必须把这个关系表现出来。\n"
-            "3. 允许增强视觉冲击力，但不能偏离原始含义，不能自作主张改主题。\n"
-            "4. detailed_prompt 必须显式围绕 core_insight 来写出主体、冲突、解法、结果和版式。\n"
-            "5. 如果 supporting_elements 有内容，优先把它们融入画面。\n"
-            "6. 输出 JSON，不要额外解释。\n"
-            "{\n"
-            '  "headline_copy": ["1-2条封面短文案"],\n'
-            '  "text_overlay_layout": "封面文字布局建议",\n'
-            '  "detailed_prompt": "最终高质量出图 prompt",\n'
-            '  "supporting_elements": ["补充视觉元素"],\n'
-            '  "composition": "构图描述",\n'
-            '  "pain_point_visual": "问题画面",\n'
-            '  "solution_visual": "解法/结果画面",\n'
-            '  "style_keywords": ["风格关键词"],\n'
-            '  "avoid_elements": ["要避免的元素"]\n'
-            "}\n\n"
-            f"论文简称：{paper_title_short or '本次主题'}\n"
-            f"core_insight：{core_insight}\n"
-            f"主视觉主体：{note.image_plan.main_subject}\n"
-            f"场景：{note.image_plan.scene}\n"
-            f"问题画面：{note.image_plan.pain_point_visual}\n"
-            f"解决画面：{note.image_plan.solution_visual}\n"
-            f"支持元素：{', '.join(supporting_elements or note.image_plan.props)}\n"
-            f"{source_excerpt}"
-        )
-        try:
-            _log_progress("调用 LLM 生成高保真封面 prompt")
-            raw = self.llm.invoke(prompt).content
-            data = _extract_json_payload(str(raw))
-            detailed_prompt = str(data.get("detailed_prompt", "")).strip()
-            headline_copy = [str(item).strip() for item in data.get("headline_copy", []) if str(item).strip()]
-            text_overlay_layout = str(data.get("text_overlay_layout", "")).strip()
-            note.image_plan.composition = str(data.get("composition", "")).strip() or note.image_plan.composition
-            note.image_plan.pain_point_visual = (
-                str(data.get("pain_point_visual", "")).strip() or note.image_plan.pain_point_visual
-            )
-            note.image_plan.solution_visual = (
-                str(data.get("solution_visual", "")).strip() or note.image_plan.solution_visual
-            )
-            style_keywords = [str(item).strip() for item in data.get("style_keywords", []) if str(item).strip()]
-            avoid_elements = [str(item).strip() for item in data.get("avoid_elements", []) if str(item).strip()]
-            if style_keywords:
-                note.image_plan.style_keywords = style_keywords
-            if avoid_elements:
-                note.image_plan.avoid_elements = avoid_elements
-            merged_supporting = supporting_elements + [
-                str(item).strip() for item in data.get("supporting_elements", []) if str(item).strip()
-            ]
-            if merged_supporting:
-                note.image_plan.props = list(dict.fromkeys(merged_supporting))[:6]
-            if detailed_prompt:
-                overlay_text = "，".join(headline_copy[:2])
-                overlay_suffix = ""
-                if overlay_text or text_overlay_layout:
-                    overlay_suffix = (
-                        f" 封面文案：{overlay_text or '无'}。"
-                        f" 文案布局：{text_overlay_layout or '标题居中偏上，避免遮挡主视觉。'}。"
-                    )
-                return self._anchor_prompt_to_core_insight(
-                    f"{detailed_prompt}{overlay_suffix}".strip(),
-                    core_insight=core_insight,
-                    supporting_elements=supporting_elements or list(note.image_plan.props),
-                    paper_title_short=paper_title_short,
-                )
-        except Exception as exc:
-            _log_progress(f"高保真封面 prompt 生成失败，回退基础模板：{exc}")
-
-        return self._anchor_prompt_to_core_insight(
-            build_cover_prompt(
-                note,
-                cover_core_insight=core_insight,
-                supporting_elements=supporting_elements,
-            ),
-            core_insight=core_insight,
-            supporting_elements=supporting_elements or list(note.image_plan.props),
-            paper_title_short=paper_title_short,
-        )
-
-    def _anchor_prompt_to_core_insight(
-        self,
-        prompt: str,
-        core_insight: str,
-        supporting_elements: list[str] | None = None,
-        paper_title_short: str = "",
-    ) -> str:
-        clean_prompt = str(prompt or "").strip()
-        insight = str(core_insight or "").strip()
-        supports = [str(item).strip() for item in (supporting_elements or []) if str(item).strip()]
-        if not insight:
-            return clean_prompt
-
-        anchor_lines = [
-            "必须忠实表现以下核心信息，不能偏题。",
-            f"核心信息：{insight}。",
-            "图片必须直接表达这层含义，而不是只画泛化的科技或 AI 元素。",
-        ]
-        if supports:
-            anchor_lines.append(f"可保留这些辅助元素：{', '.join(supports[:6])}。")
-        if paper_title_short:
-            anchor_lines.append(f"主题简称：{paper_title_short}。")
-
-        anchor_text = " ".join(anchor_lines).strip()
-        if not clean_prompt:
-            return anchor_text
-        return f"{clean_prompt} {anchor_text}".strip()
-
     def generate_note_artifact(
         self,
         history: list[dict],
@@ -1115,17 +795,11 @@ class XHSNoteService:
         paper_title = _extract_paper_title(source_materials)
         paper_title_short = _build_paper_title_short(paper_title)
         if source_materials:
-            _log_progress(f"找到 {len(source_materials)} 份封面源材料，默认使用第一篇已加载文档")
+            _log_progress(f"Found {len(source_materials)} cover source items; keeping them only for title/archive metadata")
         else:
-            _log_progress("未找到原文摘要/引言源材料，回退使用笔记结论")
-        cover_brief = self._build_cover_brief(note, history, source_materials)
-        _log_progress("开始生成详细封面 prompt")
-        image_prompt = self._build_detailed_cover_prompt(
-            note=note,
-            cover_brief=cover_brief,
-            source_materials=source_materials,
-            paper_title_short=paper_title_short,
-        )
+            _log_progress("No source abstract/intro available; generating advanced prompt from title only")
+        _log_progress("Generating detailed cover prompt from title")
+        image_prompt = self._build_title_based_cover_prompt(note.title)
         negative_prompt = build_cover_negative_prompt(note)
         _log_progress(f"封面 prompt 已生成，长度={len(image_prompt)}")
         target_dir = Path(output_dir) if output_dir else None
@@ -1139,8 +813,8 @@ class XHSNoteService:
                     note,
                     image_count=image_count,
                     output_dir=target_dir,
-                    cover_core_insight=str(cover_brief.get("core_insight", "")).strip(),
-                    supporting_elements=list(cover_brief.get("supporting_elements", []) or []),
+                    cover_core_insight=note.title,
+                    supporting_elements=list(note.image_plan.props),
                     prompt_override=image_prompt,
                 )
                 _log_progress(f"图片生成完成，数量={len(image_paths)}")
@@ -1163,7 +837,7 @@ class XHSNoteService:
             image_prompt=image_prompt,
             image_negative_prompt=negative_prompt,
             cover_source_materials=source_materials,
-            cover_core_insight=str(cover_brief.get("core_insight", "")).strip(),
+            cover_core_insight=note.title,
             paper_title=paper_title,
             paper_title_short=paper_title_short,
             image_paths=image_paths,
