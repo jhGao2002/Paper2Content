@@ -511,7 +511,7 @@ class XHSNoteService:
             f"用户prompt：{prompt_text}"
         )
         try:
-            raw = str(self.fast_llm.invoke(prompt).content).strip()
+            raw = str(self.llm.invoke(prompt).content).strip()
         except Exception as exc:
             _log_progress(f"标题总结失败，改用规则兜底：{exc}")
             raw = ""
@@ -555,8 +555,8 @@ class XHSNoteService:
             f"Input: {clean_title}"
         )
         try:
-            _log_progress("Using fast_llm to build the advanced English cover prompt from title")
-            raw = str(self.fast_llm.invoke(prompt).content).strip()
+            _log_progress("Using primary llm to build the advanced English cover prompt from title")
+            raw = str(self.llm.invoke(prompt).content).strip()
             payload = _extract_json_payload(raw)
             candidate = str(payload.get("vlm_prompt", "")).strip()
             if candidate:
