@@ -7,6 +7,7 @@
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import SystemMessage, ToolMessage
+from config import with_langsmith_config
 
 
 def build_sub_agent(llm, tools: list, system_prompt: str, name: str = "Agent", max_tool_calls: int = 2):
@@ -63,4 +64,13 @@ def build_sub_agent(llm, tools: list, system_prompt: str, name: str = "Agent", m
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", should_continue)
     graph.add_edge("tools", "agent")
-    return graph.compile()
+    return with_langsmith_config(
+        graph.compile(),
+        run_name=name,
+        extra_tags=["agent", name],
+        extra_metadata={
+            "component": "agent",
+            "agent_name": name,
+            "max_tool_calls": max_tool_calls,
+        },
+    )

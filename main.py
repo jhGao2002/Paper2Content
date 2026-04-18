@@ -5,7 +5,7 @@ import sqlite3
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from config import get_embeddings, get_fast_llm, get_llm
+from config import build_langsmith_runnable_config, get_embeddings, get_fast_llm, get_llm
 from document.loader import load_document
 from document.registry import get_all_documents, unregister_document
 from document.source_excerpt import collect_cover_source_materials
@@ -141,6 +141,27 @@ class MultiAgentApp:
             has_active_publish_workflow=self.has_active_publish_workflow,
         )
 
+    def _runtime_config(
+        self,
+        *,
+        run_name: str,
+        extra_tags: list[str] | None = None,
+        extra_metadata: dict | None = None,
+    ) -> dict:
+        metadata = {
+            "component": "multi_agent_app",
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        return build_langsmith_runnable_config(
+            run_name=run_name,
+            extra_tags=["runtime", "session", *(extra_tags or [])],
+            extra_metadata=metadata,
+            configurable={"thread_id": self.session_id},
+        )
+
     def _record_retrieval(self, content: str) -> None:
         self.last_retrieved_docs = content
 
@@ -152,7 +173,7 @@ class MultiAgentApp:
         )
 
     def get_chat_history(self) -> list:
-        config = {"configurable": {"thread_id": self.session_id}}
+        config = self._runtime_config(run_name="chat_history_read", extra_tags=["history"])
         try:
             state = self.app.get_state(config)
             messages = state.values.get("messages", [])
@@ -174,7 +195,11 @@ class MultiAgentApp:
     def ask(self, question: str) -> str:
         self.stats["questions_asked"] += 1
         self.last_retrieved_docs = ""
-        config = {"configurable": {"thread_id": self.session_id}}
+        config = self._runtime_config(
+            run_name="chat_turn",
+            extra_tags=["chat"],
+            extra_metadata={"question_length": len(question)},
+        )
 
         if self._first_message:
             update_session_title(self.session_id, question)

@@ -3,6 +3,7 @@ python-dotenv
 gradio
 langchain-core
 langchain-openai
+langsmith
 langgraph
 langgraph-checkpoint-sqlite
 langgraph-prebuilt
