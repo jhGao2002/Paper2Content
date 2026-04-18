@@ -1,139 +1,184 @@
-<h1 align="center">Paper2Content</h1>
+# Paper2Content
 
-<p align="center">
-  <strong>From Paper Reading to Publish-Ready Content.</strong>
-</p>
+> From paper reading to publish-ready content.
 
-<p align="center">
-  一个基于 LangGraph、FAISS 与 MCP 构建的智能文献学习与内容生产系统。
-</p>
+## 项目效果演示
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+" />
-  <img src="https://img.shields.io/badge/LangGraph-Agentic%20Workflow-121D33" alt="LangGraph" />
-  <img src="https://img.shields.io/badge/FAISS-Vector%20Store-0096FF" alt="FAISS" />
-  <img src="https://img.shields.io/badge/MCP-Content%20Publishing-5B6CFF" alt="MCP" />
-  <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome" />
-  <img src="https://img.shields.io/badge/License-Not%20Specified-lightgrey" alt="License Not Specified" />
-</p>
+- 小红书实际效果展示：[`Paper2Content Demo`](https://www.xiaohongshu.com/user/profile/66c61447000000001d022d71?xsec_token=ABPFxo8ykoitViGyQmpeYXzn6WmSGoKOnquRuc0f-R3yU%3D&xsec_source=pc_search)
 
-> Paper2Content 并不是一个停留在“Chat with PDF”的 Demo，而是一个把 **文献学习、知识沉淀、内容整理、封面生成、风格迁移与发布工作流** 串成完整闭环的 Agentic System。项目支持长文本解析、历史记忆回溯、多模态图文生成及跨平台自动化分发，形成“文献学习-内容输出-知识复盘”的完整学习闭环。
+Paper2Content 是一个基于 LangGraph、FAISS 与 MCP 构建的论文学习与内容生产系统。它不只是在做 “Chat with PDF”，而是把论文解析、检索问答、会话沉淀、图文草稿生成、封面生成、风格迁移和小红书发布串成了一条完整工作流。
 
----
+当前项目适合这几类场景：
 
-## 项目简介 (Overview)
+- 读论文时，希望能持续追问、对比多篇文献并保留上下文。
+- 想把论文 insight 整理成适合发布的小红书图文。
+- 想把问答过程沉淀为可复用的会话资产，而不是一次性聊天记录。
 
-Paper2Content 解决的是研究者、AI 工程师和技术内容创作者在真实工作流里的断层问题: 论文能读，但难以持续检索；问答能做，但难以沉淀为结构化知识；内容能产出，但很难直接回到可发布的图文资产。当前实现以 `PyMuPDF4LLM -> Parent/Child Chunking -> FAISS -> LangGraph Supervisor -> Note Workflow -> MCP Publish` 为主干，把 PDF 论文解析为可检索知识库，把多轮对话压缩为会话级长期记忆，再把关键 insight 组织成可修改、可生成封面、可发布的小红书图文内容。
+## 核心能力
 
-系统的价值不在单点能力，而在于它把“文献学习 -> 内容输出 -> 知识复盘”做成了一个可反复执行的闭环:
+- PDF 原生入库：使用 `PyMuPDF4LLM` 解析论文，并做父子分块后写入 FAISS。
+- 多 Agent 问答：`Supervisor` 负责任务路由，协调 `ResearchAgent`、`NoteAgent`、`GeneralAgent`。
+- 长期记忆：对话可压缩并写入会话级语义记忆，用于后续问答时的上下文补充。
+- 图文生产：从会话历史生成小红书笔记草稿、封面提示词和发布参数。
+- 发布链路：支持小红书 MCP 发布，以及封面风格迁移 MCP。
 
-- 学习阶段，支持多论文检索、复杂问题拆解和基于证据的回答。
-- 输出阶段，能从问答记录和会话笔记中提炼可发布的正文草稿与封面 prompt。
-- 复盘阶段，系统会把对话压缩为长期记忆，并在后续问答中按 `user_id + session_id` 语义回注。
+## 项目简介
 
----
+Paper2Content 解决的是一条经常断裂的链路：
 
-## 核心特性 (Key Features)
+`读论文 -> 做问答 -> 形成理解 -> 整理为内容 -> 发布 -> 复盘`
 
-- 📄 **论文原生入库链路**: 使用 `PyMuPDF4LLM` 将 PDF 转为 Markdown，并按父子块策略切分为 `1500/200` 父块与 `400/50` 子块；文档入库后自动抽取标题、摘要与分块数，持久化到 `documents.json`。
-- 🧭 **Supervisor 驱动的 Plan-and-Act 编排**: `Supervisor` 会判断问题是简单单跳检索还是复杂多步任务；复杂问题自动生成 plan，分派给 `ResearchAgent / NoteAgent / GeneralAgent`，最后由 `Synthesizer` 汇总多步结果。
-- 🔎 **面向长文献的检索增强链路**: `ResearchAgent` 先做 query expansion，再并行召回子块，通过 `parent_id + parent_text` 回填父块上下文，最后交给 fast LLM 做 rerank，减少长论文问答中的碎片化回答。
-- 🧠 **会话级长期记忆与窗口压缩**: 当消息窗口超限时，系统会自动压缩早期对话并写入语义记忆库；后续问答会按会话粒度检索事实与笔记，实现真正可复盘的学习过程。
-- ✍️ **从论文理解到内容发布的闭环**: `NoteAgent + XHSNoteService` 支持从问答候选筛选、正文草稿生成、封面高级 prompt 构建，到封面图生成、风格迁移与 MCP 发布，把论文 insight 直接变成图文内容资产。
+这里的“复盘”不是把历史对话简单压缩后回注。更准确地说：
 
----
+- 会话内的历史内容会被压缩成长期记忆，帮助后续继续问答。
+- 内容产出后的复盘，可以回到小红书发布侧查看成稿表现，再继续迭代标题、正文、封面和发布策略。
 
-## 系统架构 (Architecture)
+也就是说，系统既支持“问答连续性”，也支持“内容发布后的结果复看”。
 
-Paper2Content 的架构不是把所有能力堆在同一条链路里，而是把“论文问答主链”和“内容生产旁路”拆开设计，在保证检索问答稳定性的前提下，再把图文生成与发布能力挂接到现有系统上。
+## 项目结构
 
-### 1. 架构目标
+```text
+paper_assitant/
+├── main.py                         # 应用入口，启动 Gradio 并组装 MultiAgentApp
+├── config.py                       # 主模型、快速模型、Embedding、LangSmith 配置
+├── requirements.txt                # Python 依赖
+├── .env.example                    # 环境变量模板
+├── document/
+│   ├── loader.py                   # PDF 解析与入库
+│   ├── chunking.py                 # 父子分块
+│   ├── registry.py                 # documents.json 元数据管理
+│   └── source_excerpt.py           # 封面素材抽取
+├── graph/
+│   ├── builder.py                  # LangGraph 主图构建
+│   └── supervisor.py               # Supervisor 路由与任务编排
+├── agents/
+│   ├── research.py                 # 文档检索问答
+│   ├── note_agent.py               # 笔记整理与发布相关路由
+│   ├── general.py                  # 通用问答
+│   └── base.py                     # ReAct Agent 基础封装
+├── memory/
+│   ├── store.py                    # 记忆读写与向量存储初始化
+│   └── compression.py              # 对话压缩
+├── session/
+│   └── manager.py                  # 会话生命周期管理
+├── ui/
+│   └── gradio_app.py               # Gradio 界面
+├── xhs/
+│   ├── note_service.py             # 小红书图文草稿生成与发布编排
+│   ├── image_service.py            # 封面图生成
+│   ├── style_transfer_service.py   # 风格迁移 MCP 调用
+│   └── publish_service.py          # 小红书 MCP 发布调用
+├── eval/                           # RAG 评测脚本
+├── docs/                           # 补充文档
+├── vectorstores/                   # FAISS 持久化目录
+├── documents.json                  # 文档注册表
+├── sessions.json                   # 会话元数据
+└── sessions.db                     # LangGraph SQLite checkpoint
+```
 
-- 保持原有论文问答、多 Agent 路由、记忆检索与 `eval` 评测链路稳定，不因为内容生产能力引入主流程回归。
-- 将论文理解、会话沉淀、图文生成、封面出图与发布编排成一条独立旁路，形成可复用的内容生产工作流。
-- 让系统既能回答“论文讲了什么”，也能继续完成“如何整理成可发布内容”的后续动作。
+## 系统架构
 
-### 2. 模块划分
+### 1. 整体链路
 
-- **文献入库层**: 负责 PDF 上传、`PyMuPDF4LLM` 解析、父子块切分、向量写入 `pdf_knowledge`，并将标题、摘要、分块等元数据登记到 `documents.json`。
-- **检索与编排层**: 由 `Supervisor` 负责任务判断与路由，简单问题直达专家 Agent，复杂问题进入 Plan-and-Act；其中 `ResearchAgent` 负责 query expansion、并行召回、父块回填与 rerank。
-- **记忆与状态层**: 聊天状态通过 `langgraph-checkpoint-sqlite` 持久化到 `sessions.db`，会话索引保存在 `sessions.json`，长期语义记忆写入 `user_semantic_memory`，支撑跨轮复盘与历史回溯。
-- **内容生产层**: `NoteAgent` 与 `XHSNoteService` 将当前会话中的 QA、笔记和记忆整理成结构化图文草稿，并生成标题、摘要、正文、标签、封面视觉规划等中间结果。
-- **图像与发布层**: `xhs/image_service.py` 负责封面 prompt 生成与图片调用，`xhs/publish_service.py` 负责组装 MCP 发布参数，并可按需接入风格迁移 MCP 和小红书发布 MCP。
+```text
+用户
+  ↓
+Gradio UI
+  ↓
+MultiAgentApp
+  ├── 论文问答主链
+  │   └── Supervisor -> ResearchAgent / NoteAgent / GeneralAgent
+  └── 内容生产侧链
+      └── XHSNoteService -> 封面生成 -> 风格迁移 -> MCP 发布
+```
 
-### 3. 主链与旁路数据流
+### 2. 论文问答主链
 
-**原有问答主链**
+```text
+用户提问
+  -> 会话历史压缩
+  -> 长期记忆检索
+  -> Supervisor 路由
+     -> ResearchAgent：检索论文、抽取证据、组织回答
+     -> NoteAgent：整理笔记、生成图文草稿、处理发布相关意图
+     -> GeneralAgent：通用解释、非检索型回答
+  -> 返回答案
+```
 
-`用户提问 -> Supervisor -> Research / Memory / General Agent -> 回答`
+这条链路负责保证论文问答能力本身的稳定性。对复杂问题，`Supervisor` 会拆步骤，再由不同 Agent 分工执行并汇总结果。
 
-这条链路负责论文检索、复杂问答与多 Agent 协同，是系统的核心学习入口，当前设计保持不变。
+### 3. 内容生产侧链
 
-**新增内容生产旁路**
+```text
+session chat history
+  -> XHSNoteService
+  -> XHSNoteDraft / XHSNoteArtifact
+  -> Image Prompt
+  -> DashScope Image Generation
+  -> Style Transfer MCP
+  -> XHS MCP publish_content
+```
 
-`session chat history -> XHSNoteService -> XHSNoteDraft -> Image Prompt -> DashScope Image Generation -> MCP Args -> publish_content`
+这条侧链消费的是会话中已经沉淀下来的内容，不直接干扰论文问答主链。这样可以把“回答问题”和“生成可发布内容”拆开，方便单独迭代。
 
-这条链路只消费已经存在的会话消息，不参与主图路由，不影响问答响应，也不会进入 `eval/` 评测管线。
+### 4. 状态与持久化
 
-### 4. 统一 Artifact 设计
+- `sessions.db`：保存 LangGraph 会话状态与消息 checkpoint。
+- `sessions.json`：保存会话元数据，如标题、创建时间。
+- `documents.json`：保存论文标题、摘要、分块数量等元信息。
+- `vectorstores/pdf_knowledge/`：论文知识库向量索引。
+- `vectorstores/user_semantic_memory/`：长期记忆向量索引。
+- `result/`：评测、生成图片等输出目录。
 
-为避免正文生成、封面生成、风格迁移和发布阶段各自重复总结，系统将内容生产结果统一收敛为一个 artifact，便于预览、落盘、重试和再编辑：
+## 评估结果
 
-- `note`: 标题、摘要、正文、CTA、hashtags、QA 提炼结果。
-- `image_prompt`: 最终传给文生图模型的 prompt。
-- `image_negative_prompt`: 当前主要用于记录视觉约束，便于后续接入支持 negative prompt 的模型。
-- `image_paths`: 已生成图片的本地路径。
-- `image_error`: 生图失败时的错误信息。
-- `mcp_args`: 与小红书 MCP 工具对齐的发布参数。
+### 1. RAG 检索评测
 
-这种设计让“会话转笔记”“封面图生成”“风格迁移”“发布重试”都能围绕同一份中间结果工作，减少跨步骤的信息漂移。
+当前项目保留了统一评测入口：
 
----
+```powershell
+python eval/eval.py
+```
 
-## 评测与表现 (Benchmarks / Performance)
-
-> 评测时间: **2026-04-16**  
-> 评测样本数: **50**  
-> 评测入口: `python eval/eval.py`  
-> 结果来源: `eval/README.md` 末尾记录与 `result/eval_runs/` 输出
-
-当前评测管线对 3 组检索方案进行了统一对比:
-
-- `01_fixed_chunk_embedding3`: 固定块切分 + `Embedding-3`
-- `02_parent_child_lexical`: 父子块切分 + 词法哈希 embedding
-- `03_parent_child_embedding3`: 父子块切分 + `Embedding-3`
+已对 3 组检索方案做过对比：
 
 | Variant | Context Precision | Context Recall | Retrieval F1 | Answer Correctness | Faithfulness |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `01_fixed_chunk_embedding3` | **0.9600** | 0.8633 | 0.8760 | 0.7251 | 0.9293 |
+| `01_fixed_chunk_embedding3` | 0.9600 | 0.8633 | 0.8760 | 0.7251 | 0.9293 |
 | `02_parent_child_lexical` | 0.3800 | 0.3933 | 0.2347 | 0.4006 | 0.8492 |
-| `03_parent_child_embedding3` | 0.9400 | **0.9250** | **0.8947** | **0.7537** | **0.9519** |
+| `03_parent_child_embedding3` | 0.9400 | 0.9250 | 0.8947 | 0.7537 | 0.9519 |
 
-核心结论很明确:
+当前最佳方案是 `03_parent_child_embedding3`，也就是“父子分块 + Embedding-3”。
 
-- **当前最佳方案是 `03_parent_child_embedding3`**，在保持高精度的同时，把 `Context Recall` 提升到 `0.9250`，更适合长论文检索与复杂问答。
-- 相比固定块基线，父子块 + `Embedding-3` 带来了更平衡的整体收益: `Recall +6.17 pts`、`Retrieval F1 +1.87 pts`、`Answer Correctness +2.86 pts`、`Faithfulness +2.26 pts`。
-- `02_parent_child_lexical` 的明显退化说明，**Chunking 策略的收益必须与足够强的向量表示能力配套**，这也是当前 RAG 方案设计中的关键工程洞察。
+### 2. LangSmith 运行观测优化
 
-此外，评测流水线还会同步记录:
+在最新一轮 LangSmith 观测中，项目主链路的响应时间和 Token 消耗都有明显下降：
 
-- 每个变体的回答生成 token 用量
-- Ragas 判分阶段 token 用量
-- 中间答案、指标 CSV 与 `latest` 快照目录
+| 指标 | 优化前 | 优化后 | 变化 |
+| --- | ---: | ---: | ---: |
+| 响应时间 | 99.44 s | 56.72 s | 降低约 43.0% |
+| Token 用量 | 4969 | 3150 | 降低约 36.6% |
 
----
+这意味着当前版本在保持核心能力的同时：
 
-## 快速开始 (Quick Start)
+- 平均响应更快，用户等待时间明显下降。
+- 推理成本更低，长链路问答与内容生产更可持续。
 
-### 1. 前置依赖
+LangSmith 截图如下：
+
+![LangSmith 评测结果](docs/assets/langsmith-eval-result.jpg)
+
+## 快速开始
+
+### 1. 环境要求
 
 - Python `3.10+`
 - 至少一组可用的 GLM / 智谱 API Key
-- 可选: DashScope 图片生成能力，用于封面图生成
-- 可选: 小红书 MCP 服务，用于自动发布图文笔记
-- 可选: 风格迁移 MCP 服务，用于封面风格迁移
+- 可选：DashScope 图片生成能力
+- 可选：小红书 MCP 服务
+- 可选：风格迁移 MCP 服务
 
-### 2. 克隆并安装依赖
+### 2. 安装依赖
 
 ```powershell
 git clone https://github.com/jhGao2002/myPaperAssistant.git
@@ -146,7 +191,7 @@ Copy-Item .env.example .env
 
 ### 3. 配置环境变量
 
-至少需要补齐以下核心配置:
+至少需要配置这些核心参数：
 
 ```env
 LLM_MODEL_ID=glm-5
@@ -159,70 +204,72 @@ ZHIPU_URL=https://open.bigmodel.cn/api/paas/v4/
 FAISS_INDEX_ROOT=vectorstores
 FAISS_USE_GPU=0
 FAISS_GPU_DEVICE=0
+
 GRADIO_SHARE=0
+GRADIO_SERVER_NAME=127.0.0.1
+GRADIO_SERVER_PORT=7861
 ```
 
-如果你要走完整的图文生产链路，再补齐可选配置:
+如果你要跑完整图文生产链路，再补充这些可选配置：
 
 ```env
 DASHSCOPE_API_KEY=your_dashscope_api_key
+DASHSCOPE_IMAGE_MODEL=z-image-turbo
 XHS_MCP_ENDPOINT=http://localhost:18060/mcp
 STYLE_TRANSFER_MCP_ENDPOINT=http://127.0.0.1:1234/mcp
 ```
 
-### 4. 启动主应用
+如果你要接 LangSmith 观测：
+
+```env
+LANGSMITH_TRACING=1
+LANGSMITH_API_KEY=your_langsmith_api_key
+LANGSMITH_PROJECT=paper2content
+```
+
+### 4. 外部 MCP 服务
+
+README 中提到的两个 MCP 服务来源如下：
+
+- 小红书 MCP 服务：[`xpzouying/xiaohongshu-mcp`](https://github.com/xpzouying/xiaohongshu-mcp)
+- 风格迁移 MCP 服务：[`jhGao2002/ADServer`](https://github.com/jhGao2002/ADServer)
+
+如果这两个服务没有启动，论文问答功能仍然可以使用，但“小红书发布”和“风格迁移”相关能力会不可用。
+
+### 5. 启动应用
 
 ```powershell
 python main.py
 ```
 
-默认访问地址:
+默认访问地址：
 
 ```text
 http://127.0.0.1:7861
 ```
 
-### 5. 典型使用路径
+### 6. 典型使用路径
 
-1. 在 Gradio 界面中上传 PDF 并完成入库。
-2. 为当前会话勾选需要参与问答的文档。
-3. 进行单文献问答或跨文献对比分析。
-4. 让系统把当前问答整理成笔记或“小红书图文笔记”。
-5. 按需生成封面图、做风格迁移，并接入 MCP 发布。
+1. 在 Gradio 页面中新建会话。
+2. 上传 PDF，完成文档入库。
+3. 勾选当前会话要参与问答的论文。
+4. 基于论文进行问答、对比和总结。
+5. 让系统整理成小红书图文草稿。
+6. 按需生成封面、做风格迁移并发布。
 
-### 6. 运行评测
+## 数据与产物
 
-完整评测:
+- `documents.json`：论文注册表，记录标题、摘要、分块数量等。
+- `sessions.json`：会话列表与标题。
+- `sessions.db`：LangGraph 会话状态数据库。
+- `vectorstores/`：FAISS 索引及明文 metadata。
+- `result/eval_runs/`：RAG 评测结果。
+- `result/xhs_note_images/`：生成的小红书封面图。
 
-```powershell
-python eval/eval.py
-```
+如果你只是想重建索引或清空历史，可以优先备份这些文件后再删除，而不是直接清仓整个仓库。
 
-快速 smoke test:
+## License
 
-```powershell
-python eval/eval.py --beta
-```
+本项目采用 [MIT License](LICENSE)。
 
-评测结果默认会输出到:
-
-```text
-result/eval_runs/
-```
-
----
-
-## 路线图 (Roadmap)
-
-- [ ] 增强检索层，继续探索更稳定的混合检索、rerank 与引用级 grounding。
-- [ ] 为内容生产链路补充更强的模板控制与可编辑工作流，提升论文到图文的可控性。
-- [ ] 增加更规范的工程化交付能力，例如 Docker 化部署、自动化测试与 CI。
-- [ ] 扩展评测集与任务类型，把单轮 QA、跨论文比较、内容生成质量纳入统一评估。
-
----
-
-## 致谢与协议 (License)
-
-Paper2Content 基于以下优秀开源生态构建: `LangGraph`、`LangChain`、`FAISS`、`PyMuPDF4LLM`、`Gradio`、`Ragas` 与 `MCP`。
-
-当前仓库 **尚未附带显式的 LICENSE 文件**。如果后续准备以标准开源项目方式长期对外发布，建议补充明确协议，例如 `MIT` 或 `Apache-2.0`，以便社区协作与二次分发。
+选择 MIT 的原因很简单：它是最常见、最易理解、协作成本最低的开源协议之一，适合当前这种以学习、实验和二次开发为主的项目形态。

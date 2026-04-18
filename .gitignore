@@ -6,6 +6,11 @@ __pycache__/
 .idea/
 
 docs/
+!docs/
+docs/*
+!docs/assets/
+docs/assets/*
+!docs/assets/langsmith-eval-result.jpg
 result/
 
 sessions.db
