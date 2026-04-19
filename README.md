@@ -19,6 +19,8 @@
 
 > Paper2Content 并不是一个停留在“Chat with PDF”的 Demo，而是一个把 **文献学习、知识沉淀、内容整理、封面生成、风格迁移与发布工作流** 串成完整闭环的 Agentic System。项目支持长文本解析、历史记忆回溯、多模态图文生成及跨平台自动化分发，形成“文献学习-内容输出-知识复盘”的完整学习闭环。
 
+> 如果这个项目对你有帮助，，欢迎点一个 Star 支持一下。
+> 项目成果展示：[小红书主页](https://www.xiaohongshu.com/user/profile/66c61447000000001d022d71?xsec_token=ABPFxo8ykoitViGyQmpeYXzqUdlElO-0BDe2UAZB19PIQ%3D&xsec_source=pc_search)
 ---
 
 
