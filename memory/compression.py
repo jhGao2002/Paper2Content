@@ -15,7 +15,7 @@ def compress_window(app, config: dict, memory_store, user_id: str, session_id: s
     """
     在 ask() 开始时调用。
     若当前消息数超过 WINDOW_SIZE，压缩最早的 COMPRESS_BATCH 条对话消息（Human/AI），
-    生成摘要全量写入 Qdrant，然后直接删除这批消息。
+    生成摘要全量写入 ，然后直接删除这批消息。
     长期记忆通过每轮 ask() 开始时的语义检索注入，保证历史信息不丢失。
     """
     state = app.get_state(config)
