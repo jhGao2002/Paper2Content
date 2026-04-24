@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,22 +30,55 @@ def _format_exception_message(exc: Exception) -> str:
     return " | ".join(dict.fromkeys(parts))
 
 
-async def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+@dataclass(frozen=True)
+class MCPToolSpec:
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] | None = None
 
-    endpoint = os.getenv("STYLE_TRANSFER_MCP_ENDPOINT", "http://127.0.0.1:1234/mcp").strip()
-    _log_progress(f"连接风格迁移 MCP 服务，endpoint={endpoint}")
-    try:
-        async with streamablehttp_client(endpoint) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                _log_progress(f"调用 MCP 工具：{tool_name}")
-                result = await session.call_tool(tool_name, arguments=arguments)
-    except Exception as exc:
-        message = _format_exception_message(exc)
-        raise RuntimeError(f"风格迁移 MCP 调用失败（tool={tool_name}, endpoint={endpoint}）：{message}") from exc
+    @property
+    def searchable_text(self) -> str:
+        schema = json.dumps(self.input_schema or {}, ensure_ascii=False)
+        return f"{self.name}\n{self.description}\n{schema}".lower()
 
+
+@dataclass(frozen=True)
+class StyleTransferToolset:
+    upload_content: MCPToolSpec
+    style_transfer: MCPToolSpec
+    download_generated: MCPToolSpec
+    upload_style: MCPToolSpec | None = None
+
+
+ROLE_HINTS = {
+    "upload_content": {
+        "preferred_names": ("upload_content_image_tool",),
+        "required": ("upload", "content", "image"),
+        "optional": ("file_name", "image_base64", "cached_path", "内容图"),
+    },
+    "upload_style": {
+        "preferred_names": ("upload_style_image_tool",),
+        "required": ("upload", "style", "image"),
+        "optional": ("file_name", "image_base64", "cached_path", "风格图"),
+    },
+    "style_transfer": {
+        "preferred_names": ("style_transfer_tool",),
+        "required": ("style", "transfer"),
+        "optional": ("content_path", "style_path", "output_path", "风格迁移"),
+    },
+    "download_generated": {
+        "preferred_names": ("download_generated_image_tool",),
+        "required": ("download", "image"),
+        "optional": ("image_path", "image_base64", "generated", "result", "结果图"),
+    },
+}
+
+
+def _endpoint() -> str:
+    return os.getenv("STYLE_TRANSFER_MCP_ENDPOINT", "http://127.0.0.1:1234/mcp").strip()
+
+
+async def _parse_tool_result(result) -> dict[str, Any]:
     if result.content:
         first = result.content[0]
         if hasattr(first, "text"):
@@ -54,6 +88,59 @@ async def _call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
             except json.JSONDecodeError:
                 return {"raw": raw}
     return {}
+
+
+async def _discover_tools(session) -> list[MCPToolSpec]:
+    tools_result = await session.list_tools()
+    specs: list[MCPToolSpec] = []
+    for tool in tools_result.tools:
+        specs.append(
+            MCPToolSpec(
+                name=str(getattr(tool, "name", "")).strip(),
+                description=str(getattr(tool, "description", "") or "").strip(),
+                input_schema=getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None),
+            )
+        )
+    return [spec for spec in specs if spec.name]
+
+
+def _score_tool_for_role(tool: MCPToolSpec, role: str) -> int:
+    hints = ROLE_HINTS[role]
+    if tool.name in hints["preferred_names"]:
+        return 10_000
+
+    text = tool.searchable_text
+    score = 0
+    for keyword in hints["required"]:
+        if keyword in text:
+            score += 100
+    for keyword in hints["optional"]:
+        if keyword.lower() in text:
+            score += 20
+    return score
+
+
+def _select_tool(tools: list[MCPToolSpec], role: str, required: bool = True) -> MCPToolSpec | None:
+    ranked = sorted(
+        ((_score_tool_for_role(tool, role), tool) for tool in tools),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if ranked and ranked[0][0] >= 100:
+        return ranked[0][1]
+    if required:
+        available = ", ".join(tool.name for tool in tools) or "none"
+        raise RuntimeError(f"未发现可用于 {role} 的 MCP 工具。当前工具：{available}")
+    return None
+
+
+def _build_toolset(tools: list[MCPToolSpec], need_style_upload: bool) -> StyleTransferToolset:
+    return StyleTransferToolset(
+        upload_content=_select_tool(tools, "upload_content", required=True),
+        upload_style=_select_tool(tools, "upload_style", required=True) if need_style_upload else None,
+        style_transfer=_select_tool(tools, "style_transfer", required=True),
+        download_generated=_select_tool(tools, "download_generated", required=True),
+    )
 
 
 def _read_image_as_base64(local_path: str) -> tuple[str, str]:
@@ -81,11 +168,18 @@ def _local_result_path(content_path: str, remote_file_name: str) -> Path:
         index += 1
 
 
-async def _upload_image(local_path: str, tool_name: str, cache_label: str) -> str:
+async def _call_tool(session, tool: MCPToolSpec, arguments: dict[str, Any]) -> dict[str, Any]:
+    _log_progress(f"调用 MCP 工具：{tool.name}")
+    result = await session.call_tool(tool.name, arguments=arguments)
+    return await _parse_tool_result(result)
+
+
+async def _upload_image(session, tool: MCPToolSpec, local_path: str, cache_label: str) -> str:
     file_name, image_base64 = _read_image_as_base64(local_path)
     _log_progress(f"上传{cache_label}到服务端缓存，local_path={local_path}")
     result = await _call_tool(
-        tool_name,
+        session,
+        tool,
         {
             "file_name": file_name,
             "image_base64": image_base64,
@@ -103,10 +197,16 @@ async def _upload_image(local_path: str, tool_name: str, cache_label: str) -> st
     return cached_path
 
 
-async def _download_generated_image(remote_image_path: str, local_content_path: str) -> tuple[str, str]:
+async def _download_generated_image(
+    session,
+    tool: MCPToolSpec,
+    remote_image_path: str,
+    local_content_path: str,
+) -> tuple[str, str]:
     _log_progress(f"下载风格迁移结果图，remote_image_path={remote_image_path}")
     result = await _call_tool(
-        "download_generated_image_tool",
+        session,
+        tool,
         {
             "image_path": remote_image_path,
         },
@@ -126,45 +226,75 @@ async def _download_generated_image(remote_image_path: str, local_content_path: 
     return str(local_path.resolve()), file_name
 
 
-async def style_transfer(content_path: str, style_path: str = "") -> dict[str, Any]:
+async def style_transfer(content_path: str, style_path: str | None = None) -> dict[str, Any]:
     if not content_path:
         raise ValueError("content_path 不能为空。")
 
+    selected_style_path = str(style_path or "").strip()
+    need_style_upload = bool(selected_style_path)
     _log_progress(
-        f"开始执行风格迁移，content_path={content_path}，style_path={style_path or '默认风格'}"
+        f"开始执行风格迁移，content_path={content_path}，style_path={selected_style_path or 'MCP 默认风格'}"
     )
 
-    server_content_path = await _upload_image(
-        local_path=content_path,
-        tool_name="upload_content_image_tool",
-        cache_label="内容图",
-    )
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
 
-    server_style_path = ""
-    if style_path:
-        server_style_path = await _upload_image(
-            local_path=style_path,
-            tool_name="upload_style_image_tool",
-            cache_label="风格图",
-        )
+    endpoint = _endpoint()
+    _log_progress(f"连接风格迁移 MCP 服务，endpoint={endpoint}")
+    try:
+        async with streamablehttp_client(endpoint) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await _discover_tools(session)
+                toolset = _build_toolset(tools, need_style_upload=need_style_upload)
+                _log_progress(
+                    "MCP 工具发现完成："
+                    f"content={toolset.upload_content.name}, "
+                    f"style={toolset.upload_style.name if toolset.upload_style else 'skip'}, "
+                    f"transfer={toolset.style_transfer.name}, "
+                    f"download={toolset.download_generated.name}"
+                )
 
-    arguments = {"content_path": server_content_path}
-    if server_style_path:
-        arguments["style_path"] = server_style_path
+                server_content_path = await _upload_image(
+                    session=session,
+                    tool=toolset.upload_content,
+                    local_path=content_path,
+                    cache_label="内容图",
+                )
 
-    _log_progress(
-        f"调用风格迁移工具，server_content_path={server_content_path}，"
-        f"server_style_path={server_style_path or '默认风格'}"
-    )
-    result = await _call_tool("style_transfer_tool", arguments)
-    remote_output_path = str(result.get("output_path", "")).strip()
-    local_output_path = ""
-    downloaded_file_name = ""
-    if bool(result.get("success")) and remote_output_path:
-        local_output_path, downloaded_file_name = await _download_generated_image(
-            remote_image_path=remote_output_path,
-            local_content_path=content_path,
-        )
+                server_style_path = ""
+                if need_style_upload:
+                    if toolset.upload_style is None:
+                        raise RuntimeError("需要上传自定义风格图，但 MCP 服务未发现风格图上传工具。")
+                    server_style_path = await _upload_image(
+                        session=session,
+                        tool=toolset.upload_style,
+                        local_path=selected_style_path,
+                        cache_label="风格图",
+                    )
+
+                arguments = {
+                    "content_path": server_content_path,
+                    "style_path": server_style_path or None,
+                }
+                _log_progress(
+                    f"调用风格迁移工具，server_content_path={server_content_path}，"
+                    f"server_style_path={server_style_path or 'None/MCP 默认风格'}"
+                )
+                result = await _call_tool(session, toolset.style_transfer, arguments)
+                remote_output_path = str(result.get("output_path", "")).strip()
+                local_output_path = ""
+                downloaded_file_name = ""
+                if bool(result.get("success")) and remote_output_path:
+                    local_output_path, downloaded_file_name = await _download_generated_image(
+                        session=session,
+                        tool=toolset.download_generated,
+                        remote_image_path=remote_output_path,
+                        local_content_path=content_path,
+                    )
+    except Exception as exc:
+        message = _format_exception_message(exc)
+        raise RuntimeError(f"风格迁移 MCP 调用失败（endpoint={endpoint}）：{message}") from exc
 
     return {
         "success": bool(result.get("success")),
@@ -172,7 +302,7 @@ async def style_transfer(content_path: str, style_path: str = "") -> dict[str, A
         "remote_output_path": remote_output_path,
         "local_output_path": local_output_path,
         "downloaded_file_name": downloaded_file_name,
-        "used_default_style": bool(result.get("used_default_style")),
+        "used_default_style": not bool(server_style_path) or bool(result.get("used_default_style")),
         "cached_content_path": server_content_path,
         "cached_style_path": server_style_path,
         "resolved_content_path": str(result.get("resolved_content_path", "")).strip(),
@@ -182,5 +312,26 @@ async def style_transfer(content_path: str, style_path: str = "") -> dict[str, A
     }
 
 
-def style_transfer_sync(content_path: str, style_path: str = "") -> dict[str, Any]:
+async def list_mcp_tools() -> list[str]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    endpoint = _endpoint()
+    _log_progress(f"列出风格迁移 MCP 工具，endpoint={endpoint}")
+    try:
+        async with streamablehttp_client(endpoint) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await _discover_tools(session)
+                return [tool.name for tool in tools]
+    except Exception as exc:
+        message = _format_exception_message(exc)
+        raise RuntimeError(f"风格迁移 MCP 工具列表获取失败（endpoint={endpoint}）：{message}") from exc
+
+
+def style_transfer_sync(content_path: str, style_path: str | None = None) -> dict[str, Any]:
     return asyncio.run(style_transfer(content_path=content_path, style_path=style_path))
+
+
+def list_mcp_tools_sync() -> list[str]:
+    return asyncio.run(list_mcp_tools())
