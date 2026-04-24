@@ -101,8 +101,6 @@ class XHSPreparedUploadPayload:
     content: str
     images: list[str]
     tags: list[str] = field(default_factory=list)
-    paper_title: str = ""
-    paper_title_short: str = ""
     is_original: bool = True
     visibility: str = "公开可见"
 
@@ -115,10 +113,7 @@ class XHSNoteArtifact:
     note: XHSNoteDraft
     image_prompt: str
     image_negative_prompt: str
-    cover_source_materials: list[dict[str, str]] = field(default_factory=list)
     cover_core_insight: str = ""
-    paper_title: str = ""
-    paper_title_short: str = ""
     image_paths: list[str] = field(default_factory=list)
     image_error: str = ""
     prepared_payload: XHSPreparedUploadPayload | None = None

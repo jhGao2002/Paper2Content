@@ -17,11 +17,11 @@ from agents.general import make_general_agent
 
 
 def build_graph(llm, fast_llm, pdf_store, memory_store, user_id: str, session_id: str,
-                stats: dict, loaded_docs: list, checkpointer, on_retrieval=None,
+                stats: dict, loaded_docs: list, checkpointer,
                 note_service=None, note_history_provider=None,
                 has_active_publish_workflow=None):
 
-    research_agent = make_research_agent(llm, fast_llm, pdf_store, loaded_docs, on_retrieval=on_retrieval)
+    research_agent = make_research_agent(llm, fast_llm, pdf_store, loaded_docs)
     note_agent = make_note_agent(
         llm,
         memory_store,

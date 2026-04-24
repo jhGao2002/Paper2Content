@@ -8,7 +8,6 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from config import build_langsmith_runnable_config, get_embeddings, get_fast_llm, get_llm
 from document.loader import load_document
 from document.registry import get_all_documents, unregister_document
-from document.source_excerpt import collect_cover_source_materials
 from graph.builder import build_graph
 from memory.compression import compress_window
 from memory.store import build_memory_context, init_vector_stores
@@ -98,7 +97,7 @@ class MultiAgentApp:
         self.llm = get_llm()
         self.fast_llm = get_fast_llm()
         embeddings = get_embeddings()
-        self.vector_backend, self.pdf_store, self.memory_store = init_vector_stores(embeddings)
+        _, self.pdf_store, self.memory_store = init_vector_stores(embeddings)
 
         self.stats = {
             "session_start": datetime.now(),
@@ -117,11 +116,9 @@ class MultiAgentApp:
             self.selected_style_image = ""
             set_session_style_image(self.session_id, "")
         self._first_message = True
-        self.last_retrieved_docs = ""
         self.xhs_note_service = XHSNoteService(
             llm=self.llm,
             fast_llm=self.fast_llm,
-            cover_source_provider=self._get_cover_source_materials,
         )
 
         conn = sqlite3.connect(get_db_path(), check_same_thread=False)
@@ -136,7 +133,6 @@ class MultiAgentApp:
             stats=self.stats,
             loaded_docs=self.loaded_docs,
             checkpointer=self._db_conn,
-            on_retrieval=self._record_retrieval,
             note_service=self.xhs_note_service,
             note_history_provider=self.get_chat_history,
             has_active_publish_workflow=self.has_active_publish_workflow,
@@ -163,16 +159,6 @@ class MultiAgentApp:
             configurable={"thread_id": self.session_id},
         )
 
-    def _record_retrieval(self, content: str) -> None:
-        self.last_retrieved_docs = content
-
-    def _get_cover_source_materials(self) -> list[dict]:
-        return collect_cover_source_materials(
-            self.pdf_store,
-            self.loaded_docs,
-            user_id=self.user_id,
-        )
-
     def get_chat_history(self) -> list:
         config = self._runtime_config(run_name="chat_history_read", extra_tags=["history"])
         try:
@@ -195,7 +181,6 @@ class MultiAgentApp:
 
     def ask(self, question: str) -> str:
         self.stats["questions_asked"] += 1
-        self.last_retrieved_docs = ""
         config = self._runtime_config(
             run_name="chat_turn",
             extra_tags=["chat"],
@@ -328,34 +313,6 @@ class MultiAgentApp:
         if self.selected_style_image == filename:
             self.selected_style_image = ""
         return {"success": True, "message": f"已删除风格图：{filename}"}
-
-    def get_selected_style_image_path(self) -> str:
-        if self.selected_style_image == DEFAULT_REMOTE_STYLE_VALUE:
-            return ""
-        return get_style_image_path(self.selected_style_image) or ""
-
-    def generate_xhs_note(
-        self,
-        generate_images: bool = False,
-        image_count: int = 1,
-        output_dir: str | None = None,
-        is_original: bool = True,
-        visibility: str = "公开可见",
-    ) -> dict:
-        history = self.get_chat_history()
-        return self.xhs_note_service.generate_note_artifact(
-            history=history,
-            generate_images=generate_images,
-            image_count=image_count,
-            output_dir=output_dir,
-            is_original=is_original,
-            visibility=visibility,
-        )
-
-    def publish_xhs_note(self, artifact: dict) -> dict:
-        return self.xhs_note_service.publish_generated_note(artifact)
-
-
 if __name__ == "__main__":
     from ui.gradio_app import create_gradio_ui
 

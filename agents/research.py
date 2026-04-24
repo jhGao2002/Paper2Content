@@ -16,7 +16,7 @@ SYSTEM_PROMPT = (
 )
 
 
-def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list, on_retrieval=None):
+def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list):
     @tool
     def list_documents() -> str:
         """列出当前可检索的文档。"""
@@ -96,8 +96,6 @@ def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list, on_retrieva
         )
         result = fast_llm.invoke(rerank_prompt).content
         print(f"  [ResearchAgent][TOOL] 检索结果长度: {len(result)}")
-        if on_retrieval:
-            on_retrieval(result)
         return result
 
     return build_sub_agent(

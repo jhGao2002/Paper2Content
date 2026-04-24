@@ -5,7 +5,7 @@ import re
 import time
 from pathlib import Path
 
-from xhs.image_service import build_cover_negative_prompt, build_cover_prompt, generate_cover_images
+from xhs.image_service import build_cover_negative_prompt, generate_cover_images
 from xhs.publish_service import build_mcp_publish_args_from_payload, publish_note_via_mcp_sync
 from xhs.style_transfer_service import style_transfer_sync
 from xhs.schemas import XHSNoteArtifact, XHSNoteDraft, XHSPreparedUploadPayload
@@ -251,37 +251,6 @@ def _repair_note(note: XHSNoteDraft) -> XHSNoteDraft:
     return note
 
 
-def _extract_paper_title(source_materials: list[dict[str, str]]) -> str:
-    if not source_materials:
-        return ""
-    return str(source_materials[0].get("title", "")).strip()
-
-
-def _build_paper_title_short(title: str) -> str:
-    raw = title.strip()
-    if not raw:
-        return ""
-    words = re.findall(r"[A-Za-z0-9]+", raw)
-    if not words:
-        compact = re.sub(r"\s+", "", raw)
-        return compact[:12]
-    if len(words) == 1:
-        return words[0][:12]
-    acronym = "".join(word[0].upper() for word in words if word)
-    return acronym[:12]
-
-
-def _compose_upload_title(note_title: str, paper_title_short: str) -> str:
-    title = note_title.strip()
-    short = paper_title_short.strip()
-    if not short:
-        return title
-    prefix = f"[{short}] "
-    if title.startswith(prefix) or title.startswith(short):
-        return title
-    return f"{prefix}{title}".strip()
-
-
 def _build_upload_content(note: XHSNoteDraft) -> str:
     content = note.body.strip()
     if note.cta and note.cta not in content:
@@ -291,10 +260,9 @@ def _build_upload_content(note: XHSNoteDraft) -> str:
 
 
 class XHSNoteService:
-    def __init__(self, llm, fast_llm=None, cover_source_provider=None):
+    def __init__(self, llm, fast_llm=None):
         self.llm = llm
         self.fast_llm = fast_llm or llm
-        self.cover_source_provider = cover_source_provider
 
     def _build_generation_prompt(self, history: list[dict]) -> str:
         conversation = _conversation_to_text(history)
@@ -446,8 +414,7 @@ class XHSNoteService:
                 history.append({"role": "assistant", "content": content})
 
         note = self.generate_note(history)
-        source_materials = self._get_cover_source_materials()
-        article_title = _extract_paper_title(source_materials).strip() or note.title.strip() or "本次分享主题"
+        article_title = note.title.strip() or "Default Topic"
         note.body = self._finalize_publish_body(note.body, article_title)
         note.summary = _truncate_text(note.summary, 80)
         note.title = _truncate_text(note.title or _topic_summary(article_title, limit=20), 20)
@@ -681,16 +648,12 @@ class XHSNoteService:
         image_paths: list[str] | None = None,
         is_original: bool = True,
     ) -> XHSPreparedUploadPayload:
-        source_materials = self._get_cover_source_materials()
-        paper_title = _extract_paper_title(source_materials).strip() or article_title.strip()
         note.body = self._finalize_publish_body(note.body, article_title)
         return XHSPreparedUploadPayload(
             title=note.title.strip(),
             content=note.body,
             images=list(image_paths or []),
             tags=list(dict.fromkeys(note.hashtags)),
-            paper_title=paper_title,
-            paper_title_short=_build_paper_title_short(paper_title),
             is_original=is_original,
             visibility=_normalize_visibility(visibility, default="公开可见"),
         )
@@ -743,10 +706,7 @@ class XHSNoteService:
             note=note,
             image_prompt=image_prompt,
             image_negative_prompt=negative_prompt,
-            cover_source_materials=self._get_cover_source_materials(),
             cover_core_insight=str(workflow.get("user_cover_prompt", "")).strip(),
-            paper_title=prepared_payload.paper_title,
-            paper_title_short=prepared_payload.paper_title_short,
             image_paths=image_paths,
             image_error="",
             prepared_payload=prepared_payload,
@@ -754,30 +714,6 @@ class XHSNoteService:
         result = self.publish_generated_note(artifact.to_dict())
         result["artifact"] = artifact.to_dict()
         return result
-
-    def _get_cover_source_materials(self) -> list[dict[str, str]]:
-        if self.cover_source_provider is None:
-            return []
-        try:
-            materials = self.cover_source_provider() or []
-        except Exception as exc:
-            _log_progress(f"获取封面源材料失败：{exc}")
-            return []
-        normalized: list[dict[str, str]] = []
-        for item in materials:
-            if not isinstance(item, dict):
-                continue
-            excerpt = str(item.get("excerpt", "")).strip()
-            if not excerpt:
-                continue
-            normalized.append(
-                {
-                    "source": str(item.get("source", "")).strip(),
-                    "title": str(item.get("title", "")).strip(),
-                    "excerpt": excerpt,
-                }
-            )
-        return normalized
 
     def generate_note_artifact(
         self,
@@ -791,13 +727,6 @@ class XHSNoteService:
         overall_start = time.perf_counter()
         _log_progress("进入 generate_note_artifact")
         note = self.generate_note(history)
-        source_materials = self._get_cover_source_materials()
-        paper_title = _extract_paper_title(source_materials)
-        paper_title_short = _build_paper_title_short(paper_title)
-        if source_materials:
-            _log_progress(f"Found {len(source_materials)} cover source items; keeping them only for title/archive metadata")
-        else:
-            _log_progress("No source abstract/intro available; generating advanced prompt from title only")
         _log_progress("Generating detailed cover prompt from title")
         image_prompt = self._build_title_based_cover_prompt(note.title)
         negative_prompt = build_cover_negative_prompt(note)
@@ -823,12 +752,10 @@ class XHSNoteService:
                 _log_progress(f"图片生成失败：{image_error}")
 
         prepared_payload = XHSPreparedUploadPayload(
-            title=_compose_upload_title(note.title, paper_title_short),
+            title=note.title.strip(),
             content=_build_upload_content(note),
             images=image_paths,
             tags=list(dict.fromkeys(note.hashtags)),
-            paper_title=paper_title,
-            paper_title_short=paper_title_short,
             is_original=is_original,
             visibility=visibility,
         )
@@ -836,10 +763,7 @@ class XHSNoteService:
             note=note,
             image_prompt=image_prompt,
             image_negative_prompt=negative_prompt,
-            cover_source_materials=source_materials,
             cover_core_insight=note.title,
-            paper_title=paper_title,
-            paper_title_short=paper_title_short,
             image_paths=image_paths,
             image_error=image_error,
             prepared_payload=prepared_payload,
@@ -854,15 +778,11 @@ class XHSNoteService:
             payload = XHSPreparedUploadPayload(**prepared_payload)
         else:
             note = XHSNoteDraft.from_dict(artifact.get("note") or {})
-            paper_title = str(artifact.get("paper_title", "")).strip()
-            paper_title_short = str(artifact.get("paper_title_short", "")).strip()
             payload = XHSPreparedUploadPayload(
-                title=_compose_upload_title(note.title, paper_title_short),
+                title=note.title.strip(),
                 content=_build_upload_content(note),
                 images=list(artifact.get("image_paths", []) or []),
                 tags=list(dict.fromkeys(note.hashtags)),
-                paper_title=paper_title,
-                paper_title_short=paper_title_short,
                 is_original=True,
                 visibility="公开可见",
             )
