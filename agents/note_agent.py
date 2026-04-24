@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
-from typing import Callable
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 
+from agents.agent_utils import (
+    PublishWorkflowContext,
+    PublishWorkflowNode,
+    extract_explicit_title,
+    is_cancel_message,
+    is_confirm_message,
+    is_continue_message,
+    is_no_message,
+    is_publish_intent,
+    is_yes_message,
+    last_user_message,
+    messages_to_history,
+)
 from agents.base import build_sub_agent
 from memory.store import save_fact
 from session.manager import (
@@ -17,9 +28,6 @@ from session.manager import (
     set_publish_workflow,
 )
 from style.gallery import get_style_image_path
-
-
-PUBLISH_ROUTE_KEYWORDS = ("发布图文笔记", "发布笔记", "发布到小红书", "小红书发布")
 
 
 SYSTEM_PROMPT = (
@@ -32,84 +40,6 @@ SYSTEM_PROMPT = (
 
 def _log_progress(message: str) -> None:
     print(f"  [NoteAgent] {message}", flush=True)
-
-
-def _messages_to_history(messages: list) -> list[dict]:
-    history: list[dict] = []
-    for msg in messages:
-        if isinstance(msg, HumanMessage):
-            content = str(msg.content).strip()
-            if content:
-                history.append({"role": "user", "content": content})
-        elif isinstance(msg, AIMessage) and str(msg.content).strip():
-            history.append({"role": "assistant", "content": str(msg.content).strip()})
-    return history
-
-
-def _last_user_message(messages: list) -> str:
-    return next(
-        (str(msg.content).strip() for msg in reversed(messages) if isinstance(msg, HumanMessage)),
-        "",
-    )
-
-
-def _is_publish_intent(text: str) -> bool:
-    if not text:
-        return False
-    if any(keyword in text for keyword in PUBLISH_ROUTE_KEYWORDS):
-        return True
-    return "发布" in text and ("笔记" in text or "小红书" in text or "图文" in text)
-
-
-def _is_cancel_message(text: str) -> bool:
-    return any(keyword in text for keyword in ("取消发布", "先别发", "不要发布", "不发布了", "停止发布"))
-
-
-def _is_continue_message(text: str) -> bool:
-    raw = str(text or "").strip()
-    keywords = ("满意", "进入下一步", "继续下一步", "继续做封面", "开始做封面", "做封面")
-    return any(keyword in raw for keyword in keywords)
-
-
-def _extract_explicit_title(text: str) -> str:
-    match = re.search(r"(?:标题|题目)\s*[：:]\s*(.+)", text)
-    if not match:
-        return ""
-    return match.group(1).strip()
-
-
-def _is_yes_message(text: str) -> bool:
-    raw = str(text or "").strip()
-    return any(keyword in raw for keyword in ("要", "需要", "做", "进行", "是", "yes", "用风格迁移"))
-
-
-def _is_no_message(text: str) -> bool:
-    raw = str(text or "").strip()
-    return any(keyword in raw for keyword in ("不要", "不需要", "不用", "不做", "否", "no"))
-
-
-def _is_confirm_message(text: str) -> bool:
-    keywords = ("确认发布", "可以发布", "确认", "发布吧", "发吧", "开始发布", "确定发布")
-    return any(keyword in str(text or "") for keyword in keywords)
-
-
-@dataclass
-class PublishWorkflowContext:
-    messages: list
-    history: list[dict]
-    workflow: dict
-    user_message: str
-    note: object | None = None
-    article_title: str = ""
-
-
-@dataclass
-class PublishWorkflowNode:
-    name: str
-    handler: Callable[[PublishWorkflowContext], str]
-
-    def run(self, context: PublishWorkflowContext) -> str:
-        return self.handler(context)
 
 
 class NoteWorkflowAgent:
@@ -172,6 +102,7 @@ class NoteWorkflowAgent:
         )
 
     def _build_workflow_nodes(self) -> dict[str, PublishWorkflowNode]:
+        # 状态机入口表：新增发布阶段时只需要注册一个节点处理函数。
         handlers = {
             "await_selection": self._run_selection_node,
             "await_body_confirmation": self._run_body_confirmation_node,
@@ -223,10 +154,10 @@ class NoteWorkflowAgent:
 
     def invoke(self, payload: dict) -> dict:
         messages = list(payload.get("messages", []))
-        user_message = _last_user_message(messages)
+        user_message = last_user_message(messages)
         workflow = get_publish_workflow(self.session_id) or {}
 
-        if _is_publish_intent(user_message) or workflow.get("active"):
+        if is_publish_intent(user_message) or workflow.get("active"):
             response = self._handle_publish_flow(messages, workflow, user_message)
             return {"messages": [AIMessage(content=response)]}
 
@@ -236,13 +167,13 @@ class NoteWorkflowAgent:
         if self.note_service is None:
             return "当前环境未初始化图文笔记服务，暂时无法处理小红书发布流程。"
 
-        history = _messages_to_history(messages)
+        history = messages_to_history(messages)
 
-        if _is_cancel_message(user_message):
+        if is_cancel_message(user_message):
             clear_publish_workflow(self.session_id)
             return "已取消当前小红书发布流程。后续如果你想重新发布，直接再说“发布到小红书”即可。"
 
-        if _is_publish_intent(user_message) and not workflow.get("active"):
+        if is_publish_intent(user_message) and not workflow.get("active"):
             _log_progress("进入发布流程，开始列出可用素材")
             return self._start_publish_workflow(history)
 
@@ -269,6 +200,7 @@ class NoteWorkflowAgent:
             note = XHSNoteDraft.from_dict(note_data)
             article_title = str(workflow.get("article_title", "")).strip() or note.title
 
+        # 每个节点只关心当前阶段的输入和状态更新，主流程不写 stage 分支逻辑。
         context = PublishWorkflowContext(
             messages=messages,
             history=history,
@@ -313,7 +245,7 @@ class NoteWorkflowAgent:
         note = context.note
         user_message = context.user_message
 
-        if _is_continue_message(user_message):
+        if is_continue_message(user_message):
             workflow["stage"] = "await_cover_prompt"
             set_publish_workflow(self.session_id, workflow)
             return (
@@ -323,7 +255,7 @@ class NoteWorkflowAgent:
                 "或者你最想让封面突出的那一句话。"
             )
 
-        explicit_title = _extract_explicit_title(user_message)
+        explicit_title = extract_explicit_title(user_message)
         if explicit_title:
             note.title = explicit_title[:20]
 
@@ -387,9 +319,9 @@ class NoteWorkflowAgent:
         return self.note_service.render_publish_confirmation(workflow)
 
     def _classify_style_transfer_intent(self, user_message: str) -> bool | None:
-        if _is_yes_message(user_message) and not _is_no_message(user_message):
+        if is_yes_message(user_message) and not is_no_message(user_message):
             return True
-        if _is_no_message(user_message):
+        if is_no_message(user_message):
             return False
 
         prompt = (
@@ -414,7 +346,7 @@ class NoteWorkflowAgent:
         user_message = context.user_message
         note = context.note
 
-        if _is_confirm_message(user_message):
+        if is_confirm_message(user_message):
             result = self.note_service.publish_confirmed_workflow(workflow)
             if result.get("success"):
                 clear_publish_workflow(self.session_id)
@@ -429,7 +361,7 @@ class NoteWorkflowAgent:
             set_publish_workflow(self.session_id, workflow)
             return f"发布失败：{result.get('message', '未知错误')}\n你可以修改草稿后再次确认发布。"
 
-        updated = self._apply_confirmation_edits(workflow, note, context.article_title, user_message)
+        updated, note = self._apply_confirmation_edits(workflow, note, context.article_title, user_message)
         note.body = self.note_service._finalize_publish_body(note.body, context.article_title)
         workflow["note_draft"] = note.to_dict()
         set_publish_workflow(self.session_id, workflow)
@@ -441,7 +373,7 @@ class NoteWorkflowAgent:
             "如果你想继续调整，直接告诉我修改意见；如果没问题，再回复“确认发布”。"
         )
 
-    def _apply_confirmation_edits(self, workflow: dict, note, article_title: str, user_message: str) -> bool:
+    def _apply_confirmation_edits(self, workflow: dict, note, article_title: str, user_message: str) -> tuple[bool, object]:
         updated = False
         visibility = workflow.get("visibility", "公开可见")
         new_visibility = self.note_service.build_prepared_payload(
@@ -453,7 +385,7 @@ class NoteWorkflowAgent:
             workflow["visibility"] = new_visibility
             updated = True
 
-        explicit_title = _extract_explicit_title(user_message)
+        explicit_title = extract_explicit_title(user_message)
         if explicit_title:
             note.title = explicit_title[:20]
             updated = True
@@ -486,7 +418,7 @@ class NoteWorkflowAgent:
             workflow["selected_style_image"] = get_session_style_image(self.session_id)
             workflow["selected_style_path"] = get_style_image_path(workflow["selected_style_image"]) or ""
 
-        return updated
+        return updated, note
 
 
 def make_note_agent(
