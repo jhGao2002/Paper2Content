@@ -143,84 +143,6 @@ def _build_toolset(tools: list[MCPToolSpec], need_style_upload: bool) -> StyleTr
     )
 
 
-def _tool_payloads(tools: list[MCPToolSpec]) -> list[dict[str, Any]]:
-    return [
-        {
-            "name": tool.name,
-            "description": tool.description,
-            "input_schema": tool.input_schema or {},
-        }
-        for tool in tools
-    ]
-
-
-def _extract_json_object(raw: str) -> dict[str, Any]:
-    text = str(raw or "").strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError(f"LLM 未返回 JSON 对象：{raw}")
-    return json.loads(text[start : end + 1])
-
-
-def _tool_by_name(tools: list[MCPToolSpec]) -> dict[str, MCPToolSpec]:
-    return {tool.name: tool for tool in tools}
-
-
-def _validate_plan(payload: dict[str, Any], tools: list[MCPToolSpec], has_local_style: bool) -> StyleTransferToolset:
-    names = _tool_by_name(tools)
-
-    upload_content_name = str(payload.get("upload_content_tool", "")).strip()
-    transfer_name = str(payload.get("style_transfer_tool", "")).strip()
-    download_name = str(payload.get("download_generated_tool", "")).strip()
-    upload_style_value = payload.get("upload_style_tool")
-    upload_style_name = str(upload_style_value or "").strip()
-    use_custom_style = bool(payload.get("use_custom_style")) and has_local_style
-
-    missing = [
-        name
-        for name in (upload_content_name, transfer_name, download_name)
-        if name not in names
-    ]
-    if missing:
-        raise ValueError(f"LLM 计划引用了不存在的必需工具：{', '.join(missing)}")
-    if use_custom_style and upload_style_name not in names:
-        raise ValueError("LLM 计划需要自定义风格图，但未给出有效的风格图上传工具。")
-
-    return StyleTransferToolset(
-        upload_content=names[upload_content_name],
-        upload_style=names[upload_style_name] if use_custom_style else None,
-        style_transfer=names[transfer_name],
-        download_generated=names[download_name],
-    )
-
-
-def _plan_toolset_with_llm(llm, tools: list[MCPToolSpec], has_local_style: bool) -> StyleTransferToolset:
-    prompt = (
-        "你是 MCP 工具调用规划器。请根据远程 MCP list_tools 返回的工具能力，"
-        "为一次封面图风格迁移生成工具调用计划。\n"
-        "任务约束：\n"
-        "1. 必须上传内容图，也就是刚生成的小红书封面图。\n"
-        "2. 必须调用风格迁移工具。\n"
-        "3. 必须下载风格化后的结果图。\n"
-        "4. 如果 has_local_style_image 为 true，你可以决定是否上传自定义风格图；"
-        "如果不上传，风格迁移的 style_path 参数会传 null。\n"
-        "5. 工具名必须完全来自 tools 列表，不要虚构工具。\n\n"
-        "只输出 JSON：\n"
-        "{\n"
-        '  "upload_content_tool": "工具名",\n'
-        '  "upload_style_tool": "工具名或null",\n'
-        '  "use_custom_style": true/false,\n'
-        '  "style_transfer_tool": "工具名",\n'
-        '  "download_generated_tool": "工具名"\n'
-        "}\n\n"
-        f"has_local_style_image: {has_local_style}\n"
-        f"tools: {json.dumps(_tool_payloads(tools), ensure_ascii=False)}"
-    )
-    raw = str(llm.invoke(prompt).content).strip()
-    return _validate_plan(_extract_json_object(raw), tools, has_local_style=has_local_style)
-
-
 def _read_image_as_base64(local_path: str) -> tuple[str, str]:
     path = Path(local_path).expanduser().resolve()
     if not path.exists() or not path.is_file():
@@ -304,7 +226,7 @@ async def _download_generated_image(
     return str(local_path.resolve()), file_name
 
 
-async def style_transfer(content_path: str, style_path: str | None = None, llm=None) -> dict[str, Any]:
+async def style_transfer(content_path: str, style_path: str | None = None) -> dict[str, Any]:
     if not content_path:
         raise ValueError("content_path 不能为空。")
 
@@ -324,14 +246,7 @@ async def style_transfer(content_path: str, style_path: str | None = None, llm=N
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await _discover_tools(session)
-                try:
-                    if llm is None:
-                        raise RuntimeError("未提供 LLM，使用规则兜底规划。")
-                    toolset = _plan_toolset_with_llm(llm, tools, has_local_style=need_style_upload)
-                    _log_progress("LLM 已基于 list_tools 生成 MCP 调用计划")
-                except Exception as plan_exc:
-                    _log_progress(f"LLM MCP 调用计划不可用，改用规则兜底：{plan_exc}")
-                    toolset = _build_toolset(tools, need_style_upload=need_style_upload)
+                toolset = _build_toolset(tools, need_style_upload=need_style_upload)
                 _log_progress(
                     "MCP 工具发现完成："
                     f"content={toolset.upload_content.name}, "
@@ -348,7 +263,9 @@ async def style_transfer(content_path: str, style_path: str | None = None, llm=N
                 )
 
                 server_style_path = ""
-                if toolset.upload_style is not None:
+                if need_style_upload:
+                    if toolset.upload_style is None:
+                        raise RuntimeError("需要上传自定义风格图，但 MCP 服务未发现风格图上传工具。")
                     server_style_path = await _upload_image(
                         session=session,
                         tool=toolset.upload_style,
@@ -412,8 +329,8 @@ async def list_mcp_tools() -> list[str]:
         raise RuntimeError(f"风格迁移 MCP 工具列表获取失败（endpoint={endpoint}）：{message}") from exc
 
 
-def style_transfer_sync(content_path: str, style_path: str | None = None, llm=None) -> dict[str, Any]:
-    return asyncio.run(style_transfer(content_path=content_path, style_path=style_path, llm=llm))
+def style_transfer_sync(content_path: str, style_path: str | None = None) -> dict[str, Any]:
+    return asyncio.run(style_transfer(content_path=content_path, style_path=style_path))
 
 
 def list_mcp_tools_sync() -> list[str]:

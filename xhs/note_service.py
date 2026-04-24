@@ -684,7 +684,6 @@ class XHSNoteService:
             transfer_result = style_transfer_sync(
                 content_path=image_paths[0],
                 style_path=selected_style_path,
-                llm=self.llm,
             )
             if not transfer_result.get("success"):
                 return {
