@@ -6,7 +6,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from config import get_llm
 from style.gallery import get_style_image_path
 from xhs.style_transfer_service import style_transfer_sync
 
@@ -56,7 +55,6 @@ def main() -> int:
         result = style_transfer_sync(
             content_path=str(content_path),
             style_path=style_path,
-            llm=get_llm(),
         )
     except Exception as exc:
         print(f"[Test] 调用失败：{exc}")

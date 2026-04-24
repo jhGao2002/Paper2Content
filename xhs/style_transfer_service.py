@@ -36,6 +36,11 @@ class MCPToolSpec:
     description: str = ""
     input_schema: dict[str, Any] | None = None
 
+    @property
+    def searchable_text(self) -> str:
+        schema = json.dumps(self.input_schema or {}, ensure_ascii=False)
+        return f"{self.name}\n{self.description}\n{schema}".lower()
+
 
 @dataclass(frozen=True)
 class StyleTransferToolset:
@@ -43,6 +48,30 @@ class StyleTransferToolset:
     style_transfer: MCPToolSpec
     download_generated: MCPToolSpec
     upload_style: MCPToolSpec | None = None
+
+
+ROLE_HINTS = {
+    "upload_content": {
+        "preferred_names": ("upload_content_image_tool",),
+        "required": ("upload", "content", "image"),
+        "optional": ("file_name", "image_base64", "cached_path", "内容图"),
+    },
+    "upload_style": {
+        "preferred_names": ("upload_style_image_tool",),
+        "required": ("upload", "style", "image"),
+        "optional": ("file_name", "image_base64", "cached_path", "风格图"),
+    },
+    "style_transfer": {
+        "preferred_names": ("style_transfer_tool",),
+        "required": ("style", "transfer"),
+        "optional": ("content_path", "style_path", "output_path", "风格迁移"),
+    },
+    "download_generated": {
+        "preferred_names": ("download_generated_image_tool",),
+        "required": ("download", "image"),
+        "optional": ("image_path", "image_base64", "generated", "result", "结果图"),
+    },
+}
 
 
 def _endpoint() -> str:
@@ -73,6 +102,45 @@ async def _discover_tools(session) -> list[MCPToolSpec]:
             )
         )
     return [spec for spec in specs if spec.name]
+
+
+def _score_tool_for_role(tool: MCPToolSpec, role: str) -> int:
+    hints = ROLE_HINTS[role]
+    if tool.name in hints["preferred_names"]:
+        return 10_000
+
+    text = tool.searchable_text
+    score = 0
+    for keyword in hints["required"]:
+        if keyword in text:
+            score += 100
+    for keyword in hints["optional"]:
+        if keyword.lower() in text:
+            score += 20
+    return score
+
+
+def _select_tool(tools: list[MCPToolSpec], role: str, required: bool = True) -> MCPToolSpec | None:
+    ranked = sorted(
+        ((_score_tool_for_role(tool, role), tool) for tool in tools),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if ranked and ranked[0][0] >= 100:
+        return ranked[0][1]
+    if required:
+        available = ", ".join(tool.name for tool in tools) or "none"
+        raise RuntimeError(f"未发现可用于 {role} 的 MCP 工具。当前工具：{available}")
+    return None
+
+
+def _build_toolset(tools: list[MCPToolSpec], need_style_upload: bool) -> StyleTransferToolset:
+    return StyleTransferToolset(
+        upload_content=_select_tool(tools, "upload_content", required=True),
+        upload_style=_select_tool(tools, "upload_style", required=True) if need_style_upload else None,
+        style_transfer=_select_tool(tools, "style_transfer", required=True),
+        download_generated=_select_tool(tools, "download_generated", required=True),
+    )
 
 
 def _tool_payloads(tools: list[MCPToolSpec]) -> list[dict[str, Any]]:
@@ -256,10 +324,14 @@ async def style_transfer(content_path: str, style_path: str | None = None, llm=N
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await _discover_tools(session)
-                if llm is None:
-                    raise RuntimeError("未提供 LLM，无法基于 list_tools 生成 MCP 工具调用计划。")
-                toolset = _plan_toolset_with_llm(llm, tools, has_local_style=need_style_upload)
-                _log_progress("LLM 已基于 list_tools 生成 MCP 调用计划")
+                try:
+                    if llm is None:
+                        raise RuntimeError("未提供 LLM，使用规则兜底规划。")
+                    toolset = _plan_toolset_with_llm(llm, tools, has_local_style=need_style_upload)
+                    _log_progress("LLM 已基于 list_tools 生成 MCP 调用计划")
+                except Exception as plan_exc:
+                    _log_progress(f"LLM MCP 调用计划不可用，改用规则兜底：{plan_exc}")
+                    toolset = _build_toolset(tools, need_style_upload=need_style_upload)
                 _log_progress(
                     "MCP 工具发现完成："
                     f"content={toolset.upload_content.name}, "
@@ -323,5 +395,26 @@ async def style_transfer(content_path: str, style_path: str | None = None, llm=N
     }
 
 
+async def list_mcp_tools() -> list[str]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    endpoint = _endpoint()
+    _log_progress(f"列出风格迁移 MCP 工具，endpoint={endpoint}")
+    try:
+        async with streamablehttp_client(endpoint) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await _discover_tools(session)
+                return [tool.name for tool in tools]
+    except Exception as exc:
+        message = _format_exception_message(exc)
+        raise RuntimeError(f"风格迁移 MCP 工具列表获取失败（endpoint={endpoint}）：{message}") from exc
+
+
 def style_transfer_sync(content_path: str, style_path: str | None = None, llm=None) -> dict[str, Any]:
     return asyncio.run(style_transfer(content_path=content_path, style_path=style_path, llm=llm))
+
+
+def list_mcp_tools_sync() -> list[str]:
+    return asyncio.run(list_mcp_tools())
