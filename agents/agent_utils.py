@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -18,15 +17,6 @@ class PublishWorkflowContext:
     user_message: str
     note: object | None = None
     article_title: str = ""
-
-
-@dataclass
-class PublishWorkflowNode:
-    name: str
-    handler: Callable[[PublishWorkflowContext], str]
-
-    def run(self, context: PublishWorkflowContext) -> str:
-        return self.handler(context)
 
 
 def messages_to_history(messages: list) -> list[dict]:

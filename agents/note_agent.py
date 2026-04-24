@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Callable, TypedDict
 
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
+from langgraph.graph import END, START, StateGraph
 
 from agents.agent_utils import (
     PublishWorkflowContext,
-    PublishWorkflowNode,
     extract_explicit_title,
     is_cancel_message,
     is_confirm_message,
@@ -42,6 +43,11 @@ def _log_progress(message: str) -> None:
     print(f"  [NoteAgent] {message}", flush=True)
 
 
+class PublishGraphState(TypedDict):
+    context: PublishWorkflowContext
+    response: str
+
+
 class NoteWorkflowAgent:
     def __init__(
         self,
@@ -59,7 +65,7 @@ class NoteWorkflowAgent:
         self.stats = stats
         self.note_service = note_service
         self.fallback_agent = self._build_fallback_agent(llm)
-        self.workflow_nodes = self._build_workflow_nodes()
+        self.workflow_graph = self._build_workflow_graph()
 
     def _build_fallback_agent(self, llm):
         @tool
@@ -101,16 +107,51 @@ class NoteWorkflowAgent:
             max_tool_calls=1,
         )
 
-    def _build_workflow_nodes(self) -> dict[str, PublishWorkflowNode]:
-        # 状态机入口表：新增发布阶段时只需要注册一个节点处理函数。
-        handlers = {
+    def _workflow_handlers(self) -> dict[str, Callable[[PublishWorkflowContext], str]]:
+        return {
             "await_selection": self._run_selection_node,
             "await_body_confirmation": self._run_body_confirmation_node,
             "await_cover_prompt": self._run_cover_prompt_node,
             "await_style_transfer_decision": self._run_style_transfer_decision_node,
             "await_confirmation": self._run_confirmation_node,
         }
-        return {name: PublishWorkflowNode(name=name, handler=handler) for name, handler in handlers.items()}
+
+    def _build_workflow_graph(self):
+        # LangGraph 负责调度当前发布阶段；每轮用户输入只推进一个节点。
+        graph = StateGraph(PublishGraphState)
+        handlers = self._workflow_handlers()
+
+        graph.add_node("dispatch", lambda state: state)
+        graph.add_node("invalid_stage", self._run_invalid_stage_node)
+        for stage, handler in handlers.items():
+            graph.add_node(stage, self._graph_node(handler))
+
+        graph.add_edge(START, "dispatch")
+        graph.add_conditional_edges(
+            "dispatch",
+            self._route_workflow_stage,
+            {**{stage: stage for stage in handlers}, "invalid_stage": "invalid_stage"},
+        )
+        for stage in handlers:
+            graph.add_edge(stage, END)
+        graph.add_edge("invalid_stage", END)
+        return graph.compile()
+
+    def _route_workflow_stage(self, state: PublishGraphState) -> str:
+        stage = str(state["context"].workflow.get("stage", ""))
+        return stage if stage in self._workflow_handlers() else "invalid_stage"
+
+    def _graph_node(self, handler: Callable[[PublishWorkflowContext], str]):
+        def run(state: PublishGraphState) -> dict:
+            return {"response": handler(state["context"])}
+
+        return run
+
+    def _run_invalid_stage_node(self, state: PublishGraphState) -> dict:
+        clear_publish_workflow(self.session_id)
+        return {
+            "response": "发布流程状态异常，我先帮你重置了。你可以重新说“发布到小红书”开始。"
+        }
 
     def _memory_note_candidates(self) -> list[str]:
         must_filters = [
@@ -182,14 +223,10 @@ class NoteWorkflowAgent:
 
         stage = str(workflow.get("stage", ""))
         _log_progress(f"处理发布流程阶段：{stage}")
-        node = self.workflow_nodes.get(stage)
-        if node is None:
-            clear_publish_workflow(self.session_id)
-            return "发布流程状态异常，我先帮你重置了。你可以重新说“发布到小红书”开始。"
 
         note = None
         article_title = ""
-        if stage != "await_selection":
+        if stage in self._workflow_handlers() and stage != "await_selection":
             note_data = workflow.get("note_draft")
             if not isinstance(note_data, dict):
                 clear_publish_workflow(self.session_id)
@@ -200,7 +237,6 @@ class NoteWorkflowAgent:
             note = XHSNoteDraft.from_dict(note_data)
             article_title = str(workflow.get("article_title", "")).strip() or note.title
 
-        # 每个节点只关心当前阶段的输入和状态更新，主流程不写 stage 分支逻辑。
         context = PublishWorkflowContext(
             messages=messages,
             history=history,
@@ -209,7 +245,8 @@ class NoteWorkflowAgent:
             note=note,
             article_title=article_title,
         )
-        return node.run(context)
+        result = self.workflow_graph.invoke({"context": context, "response": ""})
+        return str(result.get("response", ""))
 
     def _run_selection_node(self, context: PublishWorkflowContext) -> str:
         indexes = list(dict.fromkeys(int(item) for item in re.findall(r"\d+", context.user_message)))
