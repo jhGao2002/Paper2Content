@@ -3,66 +3,90 @@ from concurrent.futures import ThreadPoolExecutor
 from langchain_core.tools import tool
 
 from agents.base import build_sub_agent
-from document.registry import format_doc_list
+from document.registry import format_doc_list, get_all_documents
 
+
+ROUTER_TOP_N = 5
 
 SYSTEM_PROMPT = (
-    "你是文档检索专家。\n"
-    "工作要求：\n"
-    "1. 先判断是否需要查看当前已加载文档，可使用 list_documents。\n"
-    "2. 需要检索内容时使用 search_pdf，可通过 source 参数限定某篇文档。\n"
-    "3. 只依据检索到的内容回答，不要编造论文细节。\n"
-    "如果没有足够证据，请明确说明。"
+    "You are a research assistant for loaded PDF papers.\n"
+    "Use list_documents when you need to inspect available papers.\n"
+    "Use search_pdf for content retrieval. If the user names a paper, pass its filename as source.\n"
+    "For cross-paper questions, compare evidence from the retrieved parent contexts."
 )
+
+
+def _doc_route_text(doc: dict) -> str:
+    return "\n".join(
+        part
+        for part in [
+            str(doc.get("title", "")).strip(),
+            str(doc.get("filename", "")).strip(),
+            str(doc.get("summary", "")).strip(),
+        ]
+        if part
+    )
 
 
 def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list):
     @tool
     def list_documents() -> str:
-        """列出当前可检索的文档。"""
-        result = format_doc_list(loaded_docs)
-        if "暂无文档" in result:
-            try:
-                sources = pdf_store.list_sources()
-                if sources:
-                    doc_list = "\n".join(f"- {name}" for name in sources)
-                    result = (
-                        f"当前共检测到 {len(sources)} 篇已入库文档：\n"
-                        f"{doc_list}\n\n"
-                        "你可以继续指定文档名做定向检索。"
-                    )
-            except Exception as exc:
-                print(f"  [ResearchAgent][TOOL] FAISS 文档列表读取失败: {exc}")
-
+        """List the papers available to the current session."""
+        result = format_doc_list(loaded_docs if loaded_docs else None)
         print(f"  [ResearchAgent][TOOL] list_documents: {result[:100]}...")
         return result
 
+    def route_sources(query: str) -> list[str]:
+        available_sources = set(pdf_store.list_sources())
+        candidate_sources = set(loaded_docs) if loaded_docs else available_sources
+        candidate_sources &= available_sources
+
+        docs = [doc for doc in get_all_documents() if doc.get("filename") in candidate_sources]
+        source_texts = {
+            doc["filename"]: _doc_route_text(doc)
+            for doc in docs
+            if doc.get("filename")
+        }
+        routed = pdf_store.rank_sources_by_text(query, source_texts, top_n=ROUTER_TOP_N)
+        print(
+            "  [ResearchAgent][ROUTER] "
+            f"candidate_count={len(candidate_sources)}, routed documents: {routed}"
+        )
+        return routed
+
     @tool
     def search_pdf(query: str, source: str = "") -> str:
-        """在 PDF 知识库中检索相关内容，可选按 source 限定文档。"""
-        print(f"  [ResearchAgent][TOOL] search_pdf 开始，query: {query}, source: {source or '全部'}")
-        if not loaded_docs:
-            return "当前会话未选择任何文档，请先在会话面板勾选要加载的文档。"
-        if source and source not in loaded_docs:
-            return f"文档 {source} 未加入当前会话，请先在会话面板勾选该文档。"
+        """Search PDF content. Use source to limit retrieval to one filename."""
+        print(f"  [ResearchAgent][TOOL] search_pdf start, query: {query}, source: {source or 'auto'}")
+
+        available_sources = set(pdf_store.list_sources())
+        if not available_sources:
+            return "No indexed PDF documents are available."
+
+        if source:
+            if source not in available_sources:
+                return f"Document {source} is not indexed."
+            target_sources = [source]
+        else:
+            target_sources = route_sources(query)
+            if not target_sources:
+                return "No relevant indexed PDF documents were found for this question."
+
         mqe_prompt = (
-            "请围绕下面的问题补充 3 个不同表达方式的检索子查询，"
-            "每行一个，避免重复。\n"
-            f"问题：{query}"
+            "Generate 3 short alternative search queries for retrieving academic paper passages.\n"
+            "Return one query per line, without numbering.\n\n"
+            f"Original question: {query}"
         )
-        extended = fast_llm.invoke(mqe_prompt).content.split("\n")
+        try:
+            extended = fast_llm.invoke(mqe_prompt).content.splitlines()
+        except Exception:
+            extended = []
         search_queries = [query] + [q.strip() for q in extended if q.strip()]
-        print(f"  [ResearchAgent][TOOL] 扩展查询: {search_queries}")
+        print(f"  [ResearchAgent][TOOL] expanded queries: {search_queries}")
 
         def search_one(single_query: str):
-            if source:
-                return pdf_store.similarity_search(
-                    single_query,
-                    k=3,
-                    filter={"must": [{"key": "source", "match": {"value": source}}]},
-                )
             docs = []
-            for selected_source in loaded_docs:
+            for selected_source in target_sources:
                 docs.extend(
                     pdf_store.similarity_search(
                         single_query,
@@ -75,27 +99,28 @@ def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list):
         with ThreadPoolExecutor() as executor:
             batches = list(executor.map(search_one, search_queries))
         all_child_docs = [doc for batch in batches for doc in batch]
-        print(f"  [ResearchAgent][TOOL] 子块召回数: {len(all_child_docs)}")
+        print(f"  [ResearchAgent][TOOL] recalled child chunks: {len(all_child_docs)}")
 
         parent_map = {}
         for doc in all_child_docs:
             parent_id = doc.metadata.get("parent_id")
             if parent_id and parent_id not in parent_map:
-                parent_map[parent_id] = doc.metadata.get("parent_text", doc.page_content)
+                source_name = doc.metadata.get("source", "")
+                parent_text = doc.metadata.get("parent_text", doc.page_content)
+                parent_map[parent_id] = f"[{source_name}]\n{parent_text}"
 
         unique_parents = list(parent_map.values())
         if not unique_parents:
-            if source:
-                return f"没有在文档 {source} 中检索到相关内容。"
-            return "没有检索到相关文档内容。"
+            return f"No relevant passages were found in: {', '.join(target_sources)}."
 
         rerank_prompt = (
-            f"请从下面的候选片段中挑选与问题最相关的内容，并直接返回可用于回答的片段。\n\n"
-            f"问题：{query}\n\n"
-            f"候选片段：\n{unique_parents[:8]}"
+            "Answer the question using only the retrieved paper contexts below. "
+            "Cite the source filename when comparing papers.\n\n"
+            f"Question: {query}\n\n"
+            f"Contexts:\n{unique_parents[:8]}"
         )
         result = fast_llm.invoke(rerank_prompt).content
-        print(f"  [ResearchAgent][TOOL] 检索结果长度: {len(result)}")
+        print(f"  [ResearchAgent][TOOL] result length: {len(result)}")
         return result
 
     return build_sub_agent(
